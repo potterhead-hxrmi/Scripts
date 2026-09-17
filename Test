@@ -1,0 +1,251 @@
+--==============================================================
+--  LIGHTNING PREDICTOR  —  ON-SCREEN HUD EDITION
+--  Layers: (1) telegraph watcher  (2) learned cadence  (3) strike hook
+--==============================================================
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+local Debris            = game:GetService("Debris")
+
+local LOCAL_PLAYER = Players.LocalPlayer
+local T0 = os.clock()
+
+-- ─────────────────────────────────────────────────────────────
+-- CONFIG
+-- ─────────────────────────────────────────────────────────────
+local CONFIG = {
+    LEAD_TIME        = 3.0,
+    LEARNING_STRIKES = 4,
+    MIN_GAP          = 1.0,
+}
+
+-- ─────────────────────────────────────────────────────────────
+-- STATE
+-- ─────────────────────────────────────────────────────────────
+local STATE = {
+    strikes     = {},
+    telegraphs  = {},
+    learning    = true,
+    lastStrikeT = -math.huge,
+    nextStrike  = nil,   -- predicted clock time of next strike
+    warnedFor   = nil,
+}
+
+local function now() return os.clock() - T0 end
+
+-- ─────────────────────────────────────────────────────────────
+-- BUILD THE ON-SCREEN GUI
+-- ─────────────────────────────────────────────────────────────
+local gui = Instance.new("ScreenGui")
+gui.Name = "LightningPredictor"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = LOCAL_PLAYER:WaitForChild("PlayerGui")
+
+-- main panel (top-center)
+local panel = Instance.new("Frame")
+panel.Name = "Panel"
+panel.AnchorPoint = Vector2.new(0.5, 0)
+panel.Position = UDim2.new(0.5, 0, 0, 12)
+panel.Size = UDim2.new(0, 320, 0, 96)
+panel.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+panel.BackgroundTransparency = 0.15
+panel.BorderSizePixel = 0
+panel.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 10)
+corner.Parent = panel
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(90, 120, 200)
+stroke.Thickness = 2
+stroke.Transparency = 0.2
+stroke.Parent = panel
+
+-- title
+local title = Instance.new("TextLabel")
+title.Name = "Title"
+title.BackgroundTransparency = 1
+title.Position = UDim2.new(0, 10, 0, 6)
+title.Size = UDim2.new(1, -20, 0, 20)
+title.Font = Enum.Font.GothamBold
+title.Text = "⚡ LIGHTNING PREDICTOR"
+title.TextColor3 = Color3.fromRGB(200, 220, 255)
+title.TextSize = 15
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = panel
+
+-- status line
+local status = Instance.new("TextLabel")
+status.Name = "Status"
+status.BackgroundTransparency = 1
+status.Position = UDim2.new(0, 10, 0, 26)
+status.Size = UDim2.new(1, -20, 0, 18)
+status.Font = Enum.Font.Gotham
+status.Text = "Learning… 0 strikes observed"
+status.TextColor3 = Color3.fromRGB(170, 180, 200)
+status.TextSize = 13
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Parent = panel
+
+-- countdown (big)
+local countdown = Instance.new("TextLabel")
+countdown.Name = "Countdown"
+countdown.BackgroundTransparency = 1
+countdown.Position = UDim2.new(0, 10, 0, 44)
+countdown.Size = UDim2.new(1, -20, 0, 34)
+countdown.Font = Enum.Font.GothamBlack
+countdown.Text = "--"
+countdown.TextColor3 = Color3.fromRGB(120, 200, 255)
+countdown.TextSize = 26
+countdown.TextXAlignment = Enum.TextXAlignment.Left
+countdown.Parent = panel
+
+-- detail line
+local detail = Instance.new("TextLabel")
+detail.Name = "Detail"
+detail.BackgroundTransparency = 1
+detail.Position = UDim2.new(0, 10, 0, 76)
+detail.Size = UDim2.new(1, -20, 0, 14)
+detail.Font = Enum.Font.Gotham
+detail.Text = "waiting for data…"
+detail.TextColor3 = Color3.fromRGB(120, 130, 150)
+detail.TextSize = 11
+detail.TextXAlignment = Enum.TextXAlignment.Left
+detail.Parent = panel
+
+-- big flashing alert banner (hidden until warning)
+local banner = Instance.new("TextLabel")
+banner.Name = "Banner"
+banner.AnchorPoint = Vector2.new(0.5, 0.5)
+banner.Position = UDim2.new(0.5, 0, 0.35, 0)
+banner.Size = UDim2.new(0, 560, 0, 90)
+banner.BackgroundColor3 = Color3.fromRGB(120, 20, 20)
+banner.BackgroundTransparency = 0.15
+banner.Font = Enum.Font.GothamBlack
+banner.Text = "⚡ LIGHTNING INCOMING ⚡"
+banner.TextColor3 = Color3.fromRGB(255, 240, 200)
+banner.TextSize = 40
+banner.Visible = false
+banner.BorderSizePixel = 0
+banner.Parent = gui
+
+local bannerCorner = Instance.new("UICorner")
+bannerCorner.CornerRadius = UDim.new(0, 14)
+bannerCorner.Parent = banner
+
+local bannerStroke = Instance.new("UIStroke")
+bannerStroke.Color = Color3.fromRGB(255, 200, 100)
+bannerStroke.Thickness = 3
+bannerStroke.Parent = banner
+
+-- ─────────────────────────────────────────────────────────────
+-- ALERT + BANNER ANIMATION
+-- ─────────────────────────────────────────────────────────────
+local function flashBanner(text, seconds)
+    banner.Text = text
+    banner.Visible = true
+    local blink = 0
+    local conn
+    conn = RunService.RenderStepped:Connect(function(dt)
+        blink += dt
+        local a = (math.sin(blink * 12) * 0.5 + 0.5)
+        banner.BackgroundTransparency = 0.15 + a * 0.45
+        banner.TextTransparency    = a * 0.15
+    end)
+    task.delay(seconds, function()
+        if conn then conn:Disconnect() end
+        banner.Visible = false
+    end)
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- LAYER 3: hook strike (safety net + learning)
+-- ─────────────────────────────────────────────────────────────
+do
+    local ok, mod = pcall(function()
+        return require(ReplicatedStorage.Shared.Utility.LightningBolt)
+    end)
+    if ok and type(mod) == "table" and type(mod.strike) == "function" then
+        local orig = mod.strike
+        mod.strike = function(a, b, opts)
+            local t = now()
+            if t - STATE.lastStrikeT >= CONFIG.MIN_GAP then
+                STATE.lastStrikeT = t
+                table.insert(STATE.strikes, { t = t })
+                if STATE.learning and #STATE.strikes >= CONFIG.LEARNING_STRIKES then
+                    STATE.learning = false
+                end
+            end
+            return orig(a, b, opts)
+        end
+    end
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- LAYER 1: telegraph watcher
+-- ─────────────────────────────────────────────────────────────
+do
+    local CLASSES = {
+        Highlight = true, PointLight = true, Sound = true,
+        ParticleEmitter = true, BillboardGui = true,
+    }
+    workspace.DescendantAdded:Connect(function(d)
+        if CLASSES[d.ClassName] then
+            table.insert(STATE.telegraphs, { t = now(), kind = d.ClassName })
+        end
+    end)
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- PREDICTION / HUD LOOP
+-- ─────────────────────────────────────────────────────────────
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+
+        -- update status line
+        status.Text = STATE.learning
+            and ("Learning… %d/%d strikes"):format(#STATE.strikes, CONFIG.LEARNING_STRIKES)
+            or  ("Predicting  •  %d strikes seen"):format(#STATE.strikes)
+
+        if not STATE.learning and #STATE.strikes >= 2 then
+            -- average interval from last few strikes
+            local n = math.min(#STATE.strikes, 6)
+            local sum, cnt = 0, 0
+            for i = #STATE.strikes - n + 1, #STATE.strikes - 1 do
+                if STATE.strikes[i] and STATE.strikes[i + 1] then
+                    sum += STATE.strikes[i + 1].t - STATE.strikes[i].t
+                    cnt += 1
+                end
+            end
+            if cnt > 0 then
+                local avg = sum / cnt
+                local last = STATE.strikes[#STATE.strikes].t
+                local nextT = last + avg
+                local left = nextT - now()
+
+                countdown.Text = (left > 0)
+                    and ("NEXT: ~%.1fs"):format(left)
+                    or  "NEXT: imminent"
+
+                detail.Text = ("avg interval %.1fs  •  %d strikes")
+                    :format(avg, #STATE.strikes)
+
+                if left > 0 and left <= CONFIG.LEAD_TIME and STATE.warnedFor ~= last then
+                    STATE.warnedFor = last
+                    flashBanner(("⚡ LIGHTNING IN %.1fs ⚡"):format(left), 3)
+                end
+            end
+        elseif STATE.learning then
+            countdown.Text = "--"
+            detail.Text = "waiting for enough strikes…"
+        end
+    end
+end)
+
+print("[predictor] HUD loaded.")
