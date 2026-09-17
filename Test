@@ -1,14 +1,11 @@
 --==============================================================
---  MULTIPLIER TRAIL TESTER  —  v1
---  Purpose: log the fruit's (X.XXx) multiplier every 0.25s
---           during a round, then dump the full trail when the
---           bolt fires. This tells us if strikes are threshold-
---           based (predictable) or random-target (not).
+--  STARTROUND RESPONSE TESTER
+--  Logs: args sent to StartRound + server return value
+--        + Cost label trail during the round
 --==============================================================
 
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService  = game:GetService("UserInputService")
 
 local LP = Players.LocalPlayer
 local T0 = os.clock()
@@ -17,129 +14,87 @@ local RF_PATH = ReplicatedStorage
     :WaitForChild("Packages")._Index["sleitnick_knit@1.6.0"]
     .knit.Services.PlantRoundService.RF
 
-local function getRF(name)
-    local ok, v = pcall(function() return RF_PATH:WaitForChild(name, 10) end)
+local function getRF(n)
+    local ok, v = pcall(function() return RF_PATH:WaitForChild(n, 10) end)
     return ok and v or nil
 end
-
 local StartRF = getRF("StartRound")
 local StopRF  = getRF("StopPlant")
 local DeadRF  = getRF("CollectDeadTree")
 
 local function now() return os.clock() - T0 end
 
--- ─────────────────────────────────────────────────────────────
--- STATE
--- ─────────────────────────────────────────────────────────────
 local STATE = {
     roundActive = false,
     roundStartT = 0,
-    roundSeed   = nil,
-    roundFert   = nil,
-    multHistory = {},   -- { t, m }
-    lastBoltT   = -math.huge,
+    samples     = {},
 }
 
 -- ─────────────────────────────────────────────────────────────
--- SMALL HUD (top-left)
+-- HUD
 -- ─────────────────────────────────────────────────────────────
 local gui = Instance.new("ScreenGui")
-gui.Name = "MultTester"
+gui.Name = "StartRoundTester"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = LP:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
-panel.AnchorPoint = Vector2.new(0, 0)
 panel.Position = UDim2.new(0, 10, 0, 10)
-panel.Size = UDim2.new(0, 220, 0, 78)
-panel.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+panel.Size = UDim2.new(0, 300, 0, 120)
+panel.BackgroundColor3 = Color3.fromRGB(15,15,20)
 panel.BackgroundTransparency = 0.15
 panel.BorderSizePixel = 0
-panel.Active = true
-panel.Draggable = true
+panel.Active = true; panel.Draggable = true
 panel.Parent = gui
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 8)
-local ps = Instance.new("UIStroke")
-ps.Color = Color3.fromRGB(90,120,200); ps.Thickness = 1.5; ps.Transparency = 0.2
-ps.Parent = panel
 
-local function mk(n, y, h, font, size, col)
+local function mk(n,y,h,f,s,c)
     local l = Instance.new("TextLabel")
     l.Name = n; l.BackgroundTransparency = 1
-    l.Position = UDim2.new(0, 8, 0, y); l.Size = UDim2.new(1, -16, 0, h)
-    l.Font = font; l.TextSize = size; l.TextColor3 = col
+    l.Position = UDim2.new(0,8,0,y); l.Size = UDim2.new(1,-16,0,h)
+    l.Font = f; l.TextSize = s; l.TextColor3 = c
     l.TextXAlignment = Enum.TextXAlignment.Left
     l.TextYAlignment = Enum.TextYAlignment.Top
-    l.TextWrapped = true
-    l.Parent = panel; return l
+    l.TextWrapped = true; l.Parent = panel; return l
 end
-
-local titleLbl = mk("Title", 4, 14, Enum.Font.GothamBold, 12, Color3.fromRGB(200,220,255))
-titleLbl.Text = "📈 MULT TESTER"
-
-local roundLbl = mk("Round", 20, 14, Enum.Font.GothamBold, 11, Color3.fromRGB(180,220,120))
-roundLbl.Text = "WAITING FOR PLANT"
-
-local multLbl  = mk("Mult", 36, 26, Enum.Font.GothamBlack, 22, Color3.fromRGB(255,220,140))
-multLbl.Text   = "--"
-
-local infoLbl  = mk("Info", 62, 12, Enum.Font.Code, 10, Color3.fromRGB(150,160,180))
-infoLbl.Text   = "samples: 0"
+local title  = mk("T",4,14,Enum.Font.GothamBold,12,Color3.fromRGB(200,220,255))
+title.Text   = "🎯 STARTROUND RESPONSE"
+local retLbl = mk("Ret",20,30,Enum.Font.Code,10,Color3.fromRGB(255,220,140))
+retLbl.Text  = "ret: --"
+local costLbl= mk("Cost",52,16,Enum.Font.Code,11,Color3.fromRGB(150,220,150))
+costLbl.Text = "cost: --"
+local timeLbl= mk("Time",70,16,Enum.Font.Code,10,Color3.fromRGB(160,160,180))
+timeLbl.Text = "t: --"
+local infoLbl= mk("Info",88,24,Enum.Font.Code,10,Color3.fromRGB(160,160,180))
+infoLbl.Text = "plant a seed"
 
 -- ─────────────────────────────────────────────────────────────
--- ROUND HANDLERS
+-- HELPERS
 -- ─────────────────────────────────────────────────────────────
-local function startRound(seed, fert)
-    STATE.roundActive = true
-    STATE.roundStartT = now()
-    STATE.roundSeed   = seed or "?"
-    STATE.roundFert   = fert or "?"
-    STATE.multHistory = {}
-    print(("[%.2f] 🟢 StartRound  seed=%s  fert=%s"):format(now(), STATE.roundSeed, STATE.roundFert))
-end
-
-local function dumpTrail(reason)
-    if #STATE.multHistory == 0 then
-        print(("[predictor] %s — no multiplier samples recorded"):format(reason))
-        return
-    end
-    print(("[predictor] 📈 %s — multiplier trail (%d samples):"):format(reason, #STATE.multHistory))
-
-    -- print as "t:value" pairs, one line each 4 pairs for readability
-    local line = {}
-    for _, e in STATE.multHistory do
-        table.insert(line, ("%.1f:%.2f"):format(e.t, e.m))
-    end
-    -- chunk into lines of 8
-    for i = 1, #line, 8 do
-        local chunk = {}
-        for j = i, math.min(i + 7, #line) do
-            table.insert(chunk, line[j])
+local function readCost()
+    for _, d in workspace:GetDescendants() do
+        if d.Name == "FruitDisplay" then
+            local bb = d:FindFirstChildWhichIsA("BillboardGui", true)
+            local fr = bb and bb:FindFirstChild("Frame")
+            local cost = fr and fr:FindFirstChild("Cost")
+            if cost and cost:IsA("TextLabel") then return cost.Text end
         end
-        print("   " .. table.concat(chunk, "  "))
     end
-
-    -- summary stats
-    local last = STATE.multHistory[#STATE.multHistory].m
-    local first = STATE.multHistory[1].m
-    local duration = STATE.multHistory[#STATE.multHistory].t - STATE.multHistory[1].t
-    print(("[predictor]    start=%.2fx  end=%.2fx  duration=%.2fs")
-        :format(first, last, duration))
+    return nil
 end
 
-local function stopRound(kind)
-    if not STATE.roundActive then return end
-    STATE.roundActive = false
-    if kind == "dead" then
-        dumpTrail(("STRIKE at %.2fs"):format(now() - STATE.roundStartT))
-    else
-        print(("[%.2f] ✅ StopPlant — harvested early"):format(now()))
+local function formatRets(rets)
+    if type(rets) ~= "table" then return tostring(rets) end
+    local out = {}
+    for i, v in rets do
+        table.insert(out, ("[%d]=%s"):format(i, tostring(v)))
     end
+    return table.concat(out, "  ")
 end
 
 -- ─────────────────────────────────────────────────────────────
--- RF HOOK via __namecall
+-- RF HOOK
 -- ─────────────────────────────────────────────────────────────
 do
     local mt = getrawmetatable(game)
@@ -152,111 +107,78 @@ do
             and (self == StartRF or self == StopRF or self == DeadRF) then
                 local args = { ... }
                 local rets = { old(self, ...) }
-                if self == StartRF then startRound(args[1], args[2])
-                elseif self == StopRF then stopRound("early")
-                elseif self == DeadRF then stopRound("dead")
+
+                if self == StartRF then
+                    STATE.roundActive = true
+                    STATE.roundStartT = now()
+                    STATE.samples = {}
+
+                    print("═══════════════════════════════════════════════")
+                    print(("[%.2f] 🟢 StartRound CALLED"):format(now()))
+                    print("   args sent:")
+                    for i, a in args do
+                        print(("     [%d] %s (%s)"):format(i, tostring(a), typeof(a)))
+                    end
+                    print("   return value from server:")
+                    if #rets == 0 then
+                        print("     (no return value)")
+                    else
+                        for i, r in rets do
+                            print(("     [%d] %s (%s)"):format(i, tostring(r), typeof(r)))
+                            if type(r) == "table" then
+                                for k, v in pairs(r) do
+                                    print(("        .%s = %s (%s)"):format(tostring(k), tostring(v), typeof(v)))
+                                end
+                            end
+                        end
+                    end
+                    print("═══════════════════════════════════════════════")
+
+                    retLbl.Text = "ret: " .. formatRets(rets)
+                elseif self == StopRF then
+                    print(("[%.2f] ✅ StopPlant (early)"):format(now()))
+                    STATE.roundActive = false
+                elseif self == DeadRF then
+                    print(("[%.2f] ☠️ CollectDeadTree (struck) — round %.2fs")
+                        :format(now(), now() - STATE.roundStartT))
+                    print("   full cost trail:")
+                    for i, s in STATE.samples do
+                        print(("     t=%.2f  cost=%s"):format(s.t, s.cost))
+                    end
+                    STATE.roundActive = false
                 end
                 return table.unpack(rets)
             end
             return old(self, ...)
         end)
         setreadonly(mt, true)
-        print("[tester] __namecall hook installed ✔")
+        print("[tester] __namecall ✔")
     end
 end
 
 -- ─────────────────────────────────────────────────────────────
--- BOLT HOOK (secondary trigger, in case CollectDeadTree lags)
+-- COST SAMPLER
 -- ─────────────────────────────────────────────────────────────
-do
-    local ok, mod = pcall(function()
-        return require(ReplicatedStorage.Shared.Utility.LightningBolt)
-    end)
-    if ok and type(mod) == "table" and type(mod.strike) == "function" then
-        local orig = mod.strike
-        mod.strike = function(a, b, opts)
-            if STATE.roundActive then
-                local t = now()
-                if t - STATE.lastBoltT >= 1.0 then
-                    STATE.lastBoltT = t
-                    print(("[%.2f] ⚡ bolt at round t=%.2fs"):format(t, t - STATE.roundStartT))
-                end
-            end
-            return orig(a, b, opts)
-        end
-    end
-end
-
--- ─────────────────────────────────────────────────────────────
--- MULTIPLIER READER  (0.25s sample rate)
--- Reads the (X.XXx) from the FruitDisplay billboard Name label
--- ─────────────────────────────────────────────────────────────
-local function readMultiplier()
-    for _, d in workspace:GetDescendants() do
-        if d.Name == "FruitDisplay" then
-            local bb = d:FindFirstChildWhichIsA("BillboardGui", true)
-            local fr = bb and bb:FindFirstChild("Frame")
-            local nm = fr and fr:FindFirstChild("Name")
-            if nm and nm:IsA("TextLabel") then
-                local x = nm.Text:match("%(([%d%.]+)x%)")
-                if x then return tonumber(x) end
-            end
-        end
-    end
-    return nil
-end
-
 task.spawn(function()
     while true do
         task.wait(0.25)
         if STATE.roundActive then
-            local m = readMultiplier()
-            if m then
-                table.insert(STATE.multHistory, { t = now() - STATE.roundStartT, m = m })
-                -- keep bounded
-                while #STATE.multHistory > 2000 do table.remove(STATE.multHistory, 1) end
-
-                multLbl.Text = ("%.2fx"):format(m)
-                infoLbl.Text = ("samples: %d  t=%.1fs")
-                    :format(#STATE.multHistory, now() - STATE.roundStartT)
+            local c = readCost()
+            if c then
+                table.insert(STATE.samples, { t = now() - STATE.roundStartT, cost = c })
+                while #STATE.samples > 2000 do table.remove(STATE.samples, 1) end
+                costLbl.Text = "cost: " .. c
+                timeLbl.Text = ("t: %.2fs  samples: %d")
+                    :format(now() - STATE.roundStartT, #STATE.samples)
             else
-                multLbl.Text = "--"
+                costLbl.Text = "cost: (none yet)"
             end
         else
-            multLbl.Text = "--"
-            infoLbl.Text = "samples: 0"
+            costLbl.Text = "cost: --"
+            timeLbl.Text = "t: --"
         end
     end
 end)
 
--- ─────────────────────────────────────────────────────────────
--- HUD STATUS LOOP
--- ─────────────────────────────────────────────────────────────
-task.spawn(function()
-    while true do
-        task.wait(0.1)
-        if STATE.roundActive then
-            roundLbl.Text = ("%s/%s  +%.1fs")
-                :format(tostring(STATE.roundSeed), tostring(STATE.roundFert),
-                        now() - STATE.roundStartT)
-            roundLbl.TextColor3 = Color3.fromRGB(120,220,120)
-        else
-            roundLbl.Text = "WAITING FOR PLANT"
-            roundLbl.TextColor3 = Color3.fromRGB(180,180,120)
-        end
-    end
-end)
-
--- ─────────────────────────────────────────────────────────────
--- KEYBOARD: press K to manually dump the current trail
--- (in case you want to snapshot mid-round)
--- ─────────────────────────────────────────────────────────────
-UserInputService.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    if input.KeyCode == Enum.KeyCode.K then
-        dumpTrail("MANUAL DUMP")
-    end
-end)
-
-print("[tester] loaded. Plant a seed, let it get struck, collect.")
-print("[tester] Press K anytime to dump the current multiplier trail.")
+print("[tester] loaded. Plant a seed and watch the console.")
+print("[tester] The important line is 'return value from server:' right after StartRound.")
