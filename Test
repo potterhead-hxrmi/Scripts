@@ -1,63 +1,64 @@
 --==============================================================
---  LIGHTNING PREDICTOR  —  v4 (Knit RemoteFunction aware)
---  Hooks: StartRound / StopPlant / CollectDeadTree (RF.InvokeServer)
---         LightningBolt.strike
---         RollWeighted.Roll
+--  LIGHTNING PREDICTOR  —  v5 (compact + draggable)
 --==============================================================
 
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
 
 local LOCAL_PLAYER = Players.LocalPlayer
 local T0 = os.clock()
 
 local CONFIG = {
-    LEAD_TIME        = 3.0,
-    LEARNING_ROUNDS  = 4,     -- rounds needed before predicting
-    MIN_GAP          = 1.0,
-    SHOW_ROLLS       = true,
-    RF_START  = "StartRound",
-    RF_STOP   = "StopPlant",
-    RF_DEAD   = "CollectDeadTree",
+    LEAD_TIME       = 3.0,
+    LEARNING_ROUNDS = 4,
+    MIN_GAP         = 1.0,
+    SHOW_ROLLS      = true,
+    RF_START = "StartRound",
+    RF_STOP  = "StopPlant",
+    RF_DEAD  = "CollectDeadTree",
 }
 
 local STATE = {
-    roundActive   = false,
-    roundStartT   = 0,
-    roundSamples  = {},   -- { strikeDelay = n, stoppedEarly = bool }
-    strikes       = {},   -- in-round bolt strikes
-    rolls         = {},
-    telegraphs    = {},
-    learning      = true,
-    lastStrikeT   = -math.huge,
+    roundActive    = false,
+    roundStartT    = 0,
+    roundSamples   = {},
+    strikes        = {},
+    rolls          = {},
+    telegraphs     = {},
+    learning       = true,
+    lastStrikeT    = -math.huge,
     warnedForRound = nil,
-    _dumpedRoll   = false,
+    _dumpedRoll    = false,
 }
 
 local function now() return os.clock() - T0 end
 
 -- ─────────────────────────────────────────────────────────────
--- Build the HUD (same layout as v3)
+-- GUI  (compact)
 -- ─────────────────────────────────────────────────────────────
 local gui = Instance.new("ScreenGui")
 gui.Name = "LightningPredictor"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = LOCAL_PLAYER:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
 panel.AnchorPoint = Vector2.new(0.5, 0)
-panel.Position = UDim2.new(0.5, 0, 0, 12)
-panel.Size = UDim2.new(0, 360, 0, 158)
+panel.Position = UDim2.new(0.5, 0, 0, 10)
+panel.Size = UDim2.new(0, 250, 0, 96)     -- much smaller
 panel.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
 panel.BackgroundTransparency = 0.15
 panel.BorderSizePixel = 0
+panel.Active = true
+panel.Draggable = true                    -- legacy drag (works in most executors)
 panel.Parent = gui
-Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
+Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 8)
 local pStroke = Instance.new("UIStroke")
 pStroke.Color = Color3.fromRGB(90, 120, 200)
-pStroke.Thickness = 2
+pStroke.Thickness = 1.5
 pStroke.Transparency = 0.2
 pStroke.Parent = panel
 
@@ -65,8 +66,8 @@ local function mk(name, y, h, font, size, col)
     local l = Instance.new("TextLabel")
     l.Name = name
     l.BackgroundTransparency = 1
-    l.Position = UDim2.new(0, 10, 0, y)
-    l.Size = UDim2.new(1, -20, 0, h)
+    l.Position = UDim2.new(0, 8, 0, y)
+    l.Size = UDim2.new(1, -16, 0, h)
     l.Font = font; l.TextSize = size; l.TextColor3 = col
     l.TextXAlignment = Enum.TextXAlignment.Left
     l.TextYAlignment = Enum.TextYAlignment.Top
@@ -75,43 +76,120 @@ local function mk(name, y, h, font, size, col)
     return l
 end
 
-local title     = mk("Title", 6, 20, Enum.Font.GothamBold, 15, Color3.fromRGB(200,220,255))
-title.Text      = "⚡ LIGHTNING PREDICTOR  v4"
+-- drag handle (the whole top strip)
+local dragBar = Instance.new("TextButton")
+dragBar.Name = "DragBar"
+dragBar.BackgroundTransparency = 1
+dragBar.Position = UDim2.new(0, 0, 0, 0)
+dragBar.Size = UDim2.new(1, 0, 0, 18)
+dragBar.Text = ""
+dragBar.AutoButtonColor = false
+dragBar.Parent = panel
 
-local roundLbl  = mk("Round", 24, 16, Enum.Font.GothamBold, 12, Color3.fromRGB(180,140,80))
-roundLbl.Text   = "WAITING FOR PLANT"
+local title = mk("Title", 2, 14, Enum.Font.GothamBold, 12, Color3.fromRGB(200,220,255))
+title.Text  = "⚡ LIGHTNING PREDICTOR  ·  drag me"
+title.ZIndex = 2
 
-local countdown = mk("Countdown", 42, 30, Enum.Font.GothamBlack, 24, Color3.fromRGB(120,200,255))
+local roundLbl = mk("Round", 18, 14, Enum.Font.GothamBold, 11, Color3.fromRGB(180,140,80))
+roundLbl.Text  = "WAITING FOR PLANT"
+
+local countdown = mk("Countdown", 34, 24, Enum.Font.GothamBlack, 19, Color3.fromRGB(120,200,255))
 countdown.Text  = "--"
 
-local detail    = mk("Detail", 72, 14, Enum.Font.Gotham, 11, Color3.fromRGB(120,130,150))
-detail.Text     = "plant a seed to start a round"
+local detail = mk("Detail", 60, 12, Enum.Font.Gotham, 10, Color3.fromRGB(140,150,170))
+detail.Text  = "plant a seed to start"
 
-local rollHead  = mk("RollHead", 88, 14, Enum.Font.GothamBold, 12, Color3.fromRGB(200,180,120))
-rollHead.Text   = "🎲 ROLL SPY"
+local rollLbl = mk("RollLbl", 74, 20, Enum.Font.Code, 10, Color3.fromRGB(150,200,150))
+rollLbl.Text  = "🎲 no rolls yet"
 
-local rollLbl   = mk("RollLbl", 104, 44, Enum.Font.Code, 11, Color3.fromRGB(150,200,150))
-rollLbl.Text    = "no rolls seen yet"
+-- ─────────────────────────────────────────────────────────────
+-- DRAG (manual, works everywhere)
+-- ─────────────────────────────────────────────────────────────
+do
+    local dragging, dragStart, startPos
 
--- banner
+    dragBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = input.Position
+            startPos  = panel.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+            local delta = input.Position - dragStart
+            panel.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- BANNER (smaller, still flashing)
+-- ─────────────────────────────────────────────────────────────
 local banner = Instance.new("TextLabel")
 banner.AnchorPoint = Vector2.new(0.5, 0.5)
-banner.Position = UDim2.new(0.5, 0, 0.35, 0)
-banner.Size = UDim2.new(0, 560, 0, 90)
+banner.Position = UDim2.new(0.5, 0, 0.3, 0)
+banner.Size = UDim2.new(0, 320, 0, 50)     -- was 560x90 → now 320x50
 banner.BackgroundColor3 = Color3.fromRGB(120, 20, 20)
 banner.BackgroundTransparency = 0.15
 banner.Font = Enum.Font.GothamBlack
 banner.Text = "⚡ LIGHTNING INCOMING ⚡"
 banner.TextColor3 = Color3.fromRGB(255, 240, 200)
-banner.TextSize = 40
+banner.TextSize = 22                       -- was 40
 banner.Visible = false
 banner.BorderSizePixel = 0
+banner.Active = true
+banner.Draggable = true
 banner.Parent = gui
-Instance.new("UICorner", banner).CornerRadius = UDim.new(0, 14)
+Instance.new("UICorner", banner).CornerRadius = UDim.new(0, 10)
 local bStroke = Instance.new("UIStroke")
 bStroke.Color = Color3.fromRGB(255, 200, 100)
-bStroke.Thickness = 3
+bStroke.Thickness = 2
 bStroke.Parent = banner
+
+-- manual drag for the banner (since TextLabel drag is finicky)
+do
+    local dragging, dragStart, startPos
+    banner.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = input.Position
+            startPos  = banner.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+            local delta = input.Position - dragStart
+            banner.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
 
 local function flashBanner(text, seconds)
     banner.Text = text
@@ -143,17 +221,13 @@ local function startRound(src)
     print(("[%.2f] 🟢 StartRound (%s)"):format(now(), src or "?"))
 end
 
-local function stopRound(successKind, src)
+local function stopRound(kind, src)
     if not STATE.roundActive then return end
     local duration = now() - STATE.roundStartT
-    local struck = (successKind == "dead")
-    if struck then
-        table.insert(STATE.roundSamples, { strikeDelay = duration, early = false })
-        print(("[%.2f] ☠️ CollectDeadTree — tree was struck (delay %.2fs)"):format(now(), duration))
-    else
-        table.insert(STATE.roundSamples, { strikeDelay = duration, early = true })
-        print(("[%.2f] ✅ StopPlant — harvested early at %.2fs"):format(now(), duration))
-    end
+    local early = (kind ~= "dead")
+    table.insert(STATE.roundSamples, { strikeDelay = duration, early = early })
+    print(("[%.2f] %s (%s) — delay %.2fs")
+        :format(now(), early and "✅ StopPlant" or "☠️ CollectDeadTree", src or "?", duration))
     STATE.roundActive = false
     if #STATE.roundSamples >= CONFIG.LEARNING_ROUNDS then
         STATE.learning = false
@@ -161,9 +235,7 @@ local function stopRound(successKind, src)
 end
 
 -- ─────────────────────────────────────────────────────────────
--- HOOK THE KNIT REMOTEFUNCTIONS
--- RemoteFunctions use :InvokeServer(); we intercept the method.
--- Use hookfunction if available, else metatable hook.
+-- HOOK KNIT REMOTEFUNCTIONS
 -- ─────────────────────────────────────────────────────────────
 local RF_PATH = ReplicatedStorage
     :WaitForChild("Packages")._Index["sleitnick_knit@1.6.0"]
@@ -174,38 +246,29 @@ local function getRF(name)
     return ok and v or nil
 end
 
-local StartRF   = getRF(CONFIG.RF_START)
-local StopRF    = getRF(CONFIG.RF_STOP)
-local DeadRF    = getRF(CONFIG.RF_DEAD)
+local StartRF, StopRF, DeadRF =
+    getRF(CONFIG.RF_START), getRF(CONFIG.RF_STOP), getRF(CONFIG.RF_DEAD)
 
 local function tryHookInvoke(rf, onCall)
-    if not rf then
-        warn("[predictor] missing RF:", rf)
-        return false
+    if not rf then warn("[predictor] missing RF") return false end
+    if type(hookfunction) ~= "function" then
+        warn("[predictor] no hookfunction — RF hooks disabled") return false
     end
-    if type(hookfunction) == "function" then
-        local oldInvoke = rf.InvokeServer
-        hookfunction(oldInvoke, function(self, ...)
-            if self == rf then
-                local rets = { oldInvoke(self, ...) }   -- call original
-                onCall(rets)
-                return table.unpack(rets)
-            end
-            return oldInvoke(self, ...)
-        end)
-        return true
-    else
-        warn("[predictor] hookfunction not available; use executor with hookfunction for RF hooks")
-        return false
-    end
+    local oldInvoke = rf.InvokeServer
+    hookfunction(oldInvoke, function(self, ...)
+        local rets = { oldInvoke(self, ...) }
+        if self == rf then onCall(rets) end
+        return table.unpack(rets)
+    end)
+    return true
 end
 
 tryHookInvoke(StartRF, function() startRound("StartRound RF") end)
-tryHookInvoke(StopRF,  function() stopRound("early",  "StopPlant RF") end)
-tryHookInvoke(DeadRF,  function() stopRound("dead",   "CollectDeadTree RF") end)
+tryHookInvoke(StopRF,  function() stopRound("early", "StopPlant RF") end)
+tryHookInvoke(DeadRF,  function() stopRound("dead",  "CollectDeadTree RF") end)
 
 -- ─────────────────────────────────────────────────────────────
--- LAYER 3: LightningBolt.strike hook
+-- LIGHTNING BOLT HOOK
 -- ─────────────────────────────────────────────────────────────
 do
     local ok, mod = pcall(function()
@@ -219,7 +282,7 @@ do
                 if t - STATE.lastStrikeT >= CONFIG.MIN_GAP then
                     STATE.lastStrikeT = t
                     table.insert(STATE.strikes, { t = t, roundT = t - STATE.roundStartT })
-                    print(("[%.2f] ⚡ bolt strike at round t=%.2fs"):format(t, t - STATE.roundStartT))
+                    print(("[%.2f] ⚡ bolt at round t=%.2fs"):format(t, t - STATE.roundStartT))
                 end
             end
             return orig(a, b, opts)
@@ -228,7 +291,7 @@ do
 end
 
 -- ─────────────────────────────────────────────────────────────
--- LAYER 4: RollWeighted.Roll hook
+-- ROLL HOOK
 -- ─────────────────────────────────────────────────────────────
 do
     local ok, RW = pcall(function()
@@ -248,10 +311,7 @@ do
             if STATE.roundActive then
                 local cw = (type(result) == "table") and result.weight or nil
                 local chance = (cw and total > 0) and (cw / total * 100) or nil
-                table.insert(STATE.rolls, {
-                    t = now(), key = key, weight = cw, total = total,
-                    chance = chance, entries = #snap,
-                })
+                table.insert(STATE.rolls, { t = now(), key = key, chance = chance, entries = #snap })
                 if CONFIG.SHOW_ROLLS then
                     print(("[%.2f] 🎲 ROLL key=%s chance=%s entries=%d")
                         :format(now(), tostring(key),
@@ -272,7 +332,7 @@ do
 end
 
 -- ─────────────────────────────────────────────────────────────
--- TELEGRAPH WATCHER (gated)
+-- TELEGRAPH WATCHER
 -- ─────────────────────────────────────────────────────────────
 do
     local C = { Highlight = true, PointLight = true, Sound = true,
@@ -285,15 +345,12 @@ do
 end
 
 -- ─────────────────────────────────────────────────────────────
--- HUD UPDATE LOOP
+-- HUD LOOP
 -- ─────────────────────────────────────────────────────────────
-local function statsOf(arr, key)
-    if #arr == 0 then return 0, 0 end
+local function avgStrike()
     local sum, n = 0, 0
-    for _, s in arr do
-        if not s.early then
-            sum += s.strikeDelay; n += 1
-        end
+    for _, s in STATE.roundSamples do
+        if not s.early then sum += s.strikeDelay; n += 1 end
     end
     return (n > 0 and sum / n or 0), n
 end
@@ -302,58 +359,48 @@ task.spawn(function()
     while true do
         task.wait(0.05)
 
-        local struckSamples = {}
-        for _, s in STATE.roundSamples do
-            if not s.early then table.insert(struckSamples, s) end
-        end
-
         if STATE.roundActive then
             local rt = now() - STATE.roundStartT
-            roundLbl.Text = ("PLANTED  •  +%.1fs"):format(rt)
+            roundLbl.Text = ("PLANTED  +%.1fs"):format(rt)
             roundLbl.TextColor3 = Color3.fromRGB(120,220,120)
 
-            -- prediction: average time-to-strike
-            local avg, n = statsOf(STATE.roundSamples)
+            local avg, n = avgStrike()
             if not STATE.learning and n >= 2 then
-                local expected = avg
-                local left = expected - rt
+                local left = avg - rt
                 countdown.Text = (left > 0)
-                    and ("STRIKE: ~%.1fs"):format(left)
-                    or  "STRIKE: imminent"
-                detail.Text = ("avg strike at %.1fs after plant  (%d samples)"):format(avg, n)
+                    and ("STRIKE ~%.1fs"):format(left)
+                    or  "STRIKE imminent"
+                detail.Text = ("avg %.1fs after plant (%d)"):format(avg, n)
 
                 if left > 0 and left <= CONFIG.LEAD_TIME
                    and STATE.warnedForRound ~= STATE.roundStartT then
                     STATE.warnedForRound = STATE.roundStartT
-                    flashBanner(("⚡ LIGHTNING IN %.1fs ⚡"):format(left), 3)
+                    flashBanner(("⚡ IN %.1fs ⚡"):format(left), 3)
                 end
             else
                 countdown.Text = "--"
-                detail.Text = ("learning… %d/%d rounds"):format(#STATE.roundSamples, CONFIG.LEARNING_ROUNDS)
+                detail.Text = ("learning %d/%d rounds"):format(#STATE.roundSamples, CONFIG.LEARNING_ROUNDS)
             end
         else
             roundLbl.Text = "WAITING FOR PLANT"
             roundLbl.TextColor3 = Color3.fromRGB(180,140,80)
-            local avg, n = statsOf(STATE.roundSamples)
-            if n > 0 then
-                countdown.Text = "--"
-                detail.Text = ("last avg strike: %.1fs  (%d samples)"):format(avg, n)
-            else
-                countdown.Text = "--"
-                detail.Text = "plant a seed to start a round"
-            end
+            local avg, n = avgStrike()
+            countdown.Text = "--"
+            detail.Text = (n > 0)
+                and ("last avg %.1fs (%d)"):format(avg, n)
+                or  "plant a seed to start"
         end
 
-        -- roll spy row
         if #STATE.rolls > 0 then
             local lr = STATE.rolls[#STATE.rolls]
-            local cs = lr.chance and ("%.2f%%"):format(lr.chance) or "n/a"
-            rollLbl.Text = ("last key=%s  chance=%s  entries=%d\n%d rolls this round")
-                :format(tostring(lr.key), cs, lr.entries, #STATE.rolls)
+            rollLbl.Text = ("🎲 %s  %s  (%d rolls)")
+                :format(tostring(lr.key),
+                        lr.chance and ("%.1f%%"):format(lr.chance) or "n/a",
+                        #STATE.rolls)
         else
-            rollLbl.Text = STATE.roundActive and "no rolls this round yet" or "idle"
+            rollLbl.Text = "🎲 no rolls yet"
         end
     end
 end)
 
-print("[predictor] v4 loaded. Hooks: StartRound/StopPlant/CollectDeadTree + bolt + roll.")
+print("[predictor] v5 loaded — compact + draggable.")
