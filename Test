@@ -1,32 +1,39 @@
 --==============================================================
---  ACTIVEPLANT DEEP WATCH
---  Watches Workspace.ActivePlant. Dumps:
---    - every attribute on it and its descendants
---    - any BasePart size changes (with timestamps)
---    - any new descendants that appear
---  Press C to copy the whole log.
+--  REFLEX HARVEST — FINAL
+--  Fires StopPlant the same frame any strike signal is detected.
+--  Multiple redundant signals for maximum coverage.
+--  Press R to toggle armed/disarmed.
+--  Press C to copy the log.
 --==============================================================
 
 local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
 
+-- ─────────────────────────────────────────────────────────────
+-- LOG + COPY
+-- ─────────────────────────────────────────────────────────────
 local LOG = {}
 local function log(s)
     print(s)
     table.insert(LOG, s)
-    if #LOG > 3000 then table.remove(LOG, 1) end
+    if #LOG > 2000 then table.remove(LOG, 1) end
 end
 
--- ─── HUD ───
+-- ─────────────────────────────────────────────────────────────
+-- HUD
+-- ─────────────────────────────────────────────────────────────
 local gui = Instance.new("ScreenGui")
-gui.Name = "ActivePlantWatch"
+gui.Name = "ReflexHarvest"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = LP:WaitForChild("PlayerGui")
+
 local panel = Instance.new("Frame")
 panel.Position = UDim2.new(0, 10, 0, 10)
-panel.Size = UDim2.new(0, 280, 0, 90)
+panel.Size = UDim2.new(0, 300, 0, 130)
 panel.BackgroundColor3 = Color3.fromRGB(15,15,20)
 panel.BackgroundTransparency = 0.15
 panel.BorderSizePixel = 0
@@ -34,18 +41,25 @@ panel.Active = true; panel.Draggable = true
 panel.Parent = gui
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 8)
 
-local infoLbl = Instance.new("TextLabel")
-infoLbl.BackgroundTransparency = 1
-infoLbl.Position = UDim2.new(0, 8, 0, 4)
-infoLbl.Size = UDim2.new(1, -16, 0, 50)
-infoLbl.Font = Enum.Font.Code
-infoLbl.TextSize = 10
-infoLbl.TextColor3 = Color3.fromRGB(200, 220, 200)
-infoLbl.TextXAlignment = Enum.TextXAlignment.Left
-infoLbl.TextYAlignment = Enum.TextYAlignment.Top
-infoLbl.TextWrapped = true
-infoLbl.Text = "watching ActivePlant..."
-infoLbl.Parent = panel
+local function mkLbl(y, h, font, size, color, text)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Position = UDim2.new(0, 8, 0, y)
+    l.Size = UDim2.new(1, -16, 0, h)
+    l.Font = font; l.TextSize = size; l.TextColor3 = color
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextYAlignment = Enum.TextYAlignment.Top
+    l.TextWrapped = true
+    l.Text = text
+    l.Parent = panel
+    return l
+end
+
+local titleLbl  = mkLbl(4, 14, Enum.Font.GothamBold, 12, Color3.fromRGB(255,200,200), "⚡ REFLEX HARVEST — FINAL")
+local statusLbl = mkLbl(20, 14, Enum.Font.GothamBold, 11, Color3.fromRGB(120,255,120), "ARMED")
+local firesLbl  = mkLbl(36, 14, Enum.Font.Code, 11, Color3.fromRGB(255,220,140), "fires: 0")
+local lastLbl   = mkLbl(52, 20, Enum.Font.Code, 10, Color3.fromRGB(200,200,200), "last: --")
+local sigLbl    = mkLbl(72, 24, Enum.Font.Code, 10, Color3.fromRGB(150,200,150), "signals: 0")
 
 local btn = Instance.new("TextButton")
 btn.Position = UDim2.new(0, 8, 1, -30)
@@ -54,136 +68,227 @@ btn.BackgroundColor3 = Color3.fromRGB(50, 90, 140)
 btn.Font = Enum.Font.GothamBold
 btn.TextSize = 12
 btn.TextColor3 = Color3.fromRGB(230, 240, 255)
-btn.Text = "📋 COPY  (C)"
+btn.Text = "📋 COPY LOG  (C)   ·   R = arm/disarm"
 btn.BorderSizePixel = 0
 btn.Parent = panel
 Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
 
-local function doCopy()
+-- ─────────────────────────────────────────────────────────────
+-- STATE
+-- ─────────────────────────────────────────────────────────────
+local STATE = {
+    armed = true,
+    fires = 0,
+    lastFireT = 0,
+    lastReason = "",
+    signalsSeen = 0,
+    roundActive = false,
+}
+
+local RF_PATH = ReplicatedStorage
+    :WaitForChild("Packages")._Index["sleitnick_knit@1.6.0"]
+    .knit.Services.PlantRoundService.RF
+
+local function getRF(n)
+    local ok, v = pcall(function() return RF_PATH:WaitForChild(n, 10) end)
+    return ok and v or nil
+end
+
+local StartRF = getRF("StartRound")
+local StopRF  = getRF("StopPlant")
+local DeadRF  = getRF("CollectDeadTree")
+
+-- ─────────────────────────────────────────────────────────────
+-- FIRE REFLEX
+-- The whole point: call StopPlant the millisecond we get a signal.
+-- Synchronous, no delays, no task.spawn.
+-- ─────────────────────────────────────────────────────────────
+local function fire(reason)
+    if not STATE.armed then return end
+    local t = os.clock()
+    -- extremely light debounce — just stops duplicate signals in the same tick
+    if t - STATE.lastFireT < 0.05 then return end
+    STATE.lastFireT = t
+    STATE.fires = STATE.fires + 1
+    STATE.lastReason = reason
+
+    log(("[reflex] 🔥 FIRE #%d @ %.3f — %s"):format(STATE.fires, t, reason))
+
+    -- fire synchronously. If StopPlant errors, note it.
+    local ok, err = pcall(function()
+        if StopRF then
+            StopRF:InvokeServer()
+        end
+    end)
+    if not ok then
+        log(("[reflex]   StopPlant failed: %s"):format(tostring(err)))
+    else
+        log("[reflex]   StopPlant ok")
+    end
+
+    lastLbl.Text = ("last: %s"):format(reason)
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- SIGNAL 1 — LightningBolt.strike hook
+-- ─────────────────────────────────────────────────────────────
+do
+    local ok, mod = pcall(function()
+        return require(ReplicatedStorage.Shared.Utility.LightningBolt)
+    end)
+    if ok and type(mod) == "table" and type(mod.strike) == "function" then
+        local orig = mod.strike
+        mod.strike = function(a, b, o)
+            STATE.signalsSeen = STATE.signalsSeen + 1
+            fire("bolt(strike)")
+            return orig(a, b, o)
+        end
+        log("[reflex] ✔ hooked LightningBolt.strike")
+    else
+        log("[reflex] ✗ could not hook LightningBolt.strike")
+    end
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- SIGNAL 2 — any bolt-like model spawning in workspace
+-- ─────────────────────────────────────────────────────────────
+do
+    local names = { Lightning = true, Bolt = true, Strike = true, VFX = true }
+    workspace.DescendantAdded:Connect(function(d)
+        if not STATE.armed then return end
+        local n = tostring(d.Name)
+        if names[n] or n:lower():find("bolt") or n:lower():find("lightning") then
+            STATE.signalsSeen = STATE.signalsSeen + 1
+            fire("workspace:" .. n)
+        end
+    end)
+    log("[reflex] ✔ watching workspace for bolt-like parts")
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- SIGNAL 3 — TreeGhost spawning
+-- ─────────────────────────────────────────────────────────────
+workspace.ChildAdded:Connect(function(c)
+    if c.Name == "TreeGhost" and STATE.armed then
+        STATE.signalsSeen = STATE.signalsSeen + 1
+        fire("TreeGhost")
+    end
+end)
+
+-- ─────────────────────────────────────────────────────────────
+-- SIGNAL 4 — watch StartRound / StopPlant / CollectDeadTree ourselves
+-- so we know when a round is active and can reset
+-- ─────────────────────────────────────────────────────────────
+do
+    local mt = getrawmetatable(game)
+    if mt then
+        local old = mt.__namecall
+        setreadonly(mt, false)
+        mt.__namecall = newcclosure(function(self, ...)
+            if getnamecallmethod() == "InvokeServer"
+            and (self == StartRF or self == StopRF or self == DeadRF) then
+                if self == StartRF then
+                    STATE.roundActive = true
+                    log("[reflex] 🟢 round start")
+                elseif self == StopRF then
+                    STATE.roundActive = false
+                    log("[reflex] ✅ StopPlant invoked")
+                elseif self == DeadRF then
+                    STATE.roundActive = false
+                    log("[reflex] ☠️ CollectDeadTree invoked — round over")
+                end
+            end
+            return old(self, ...)
+        end)
+        setreadonly(mt, true)
+        log("[reflex] ✔ __namecall hooked for round events")
+    end
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- SIGNAL 5 — last-line-of-defense: when a round is active, sample
+-- the tree's bbox height every 0.05s. If growth ever STOPS for
+-- 2 samples in a row (plateau), fire. That's the split-second
+-- before the strike.
+-- ─────────────────────────────────────────────────────────────
+do
+    local lastY, stableCount = nil, 0
+    task.spawn(function()
+        while true do
+            task.wait(0.05)
+            if not STATE.armed or not STATE.roundActive then
+                lastY, stableCount = nil, 0
+            else
+                local ap = workspace:FindFirstChild("ActivePlant")
+                if ap then
+                    local y
+                    if ap:IsA("Model") then
+                        local _, s = ap:GetBoundingBox()
+                        y = s.Y
+                    elseif ap:IsA("BasePart") then
+                        y = ap.Size.Y
+                    end
+                    if y then
+                        if lastY and math.abs(y - lastY) < 0.001 then
+                            stableCount = stableCount + 1
+                            if stableCount == 3 then
+                                fire("growth plateau")
+                            end
+                        else
+                            stableCount = 0
+                        end
+                        lastY = y
+                    end
+                end
+            end
+        end
+    end)
+    log("[reflex] ✔ growth plateau watcher running")
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- HUD updates + hotkeys
+-- ─────────────────────────────────────────────────────────────
+task.spawn(function()
+    while true do
+        task.wait(0.2)
+        if STATE.armed then
+            statusLbl.Text = STATE.roundActive and "ARMED · round active" or "ARMED · idle"
+            statusLbl.TextColor3 = Color3.fromRGB(120,255,120)
+        else
+            statusLbl.Text = "DISARMED"
+            statusLbl.TextColor3 = Color3.fromRGB(255,120,120)
+        end
+        firesLbl.Text = ("fires: %d"):format(STATE.fires)
+        sigLbl.Text = ("signals seen: %d"):format(STATE.signalsSeen)
+    end
+end)
+
+btn.MouseButton1Click:Connect(function()
     local text = table.concat(LOG, "\n")
     pcall(function()
         if setclipboard then setclipboard(text)
         elseif toclipboard then toclipboard(text) end
     end)
-    infoLbl.Text = ("copied %d lines"):format(#LOG)
+    btn.Text = ("copied %d lines"):format(#LOG)
     task.delay(2, function()
-        infoLbl.Text = "watching ActivePlant..."
+        btn.Text = "📋 COPY LOG  (C)   ·   R = arm/disarm"
     end)
-end
-btn.MouseButton1Click:Connect(doCopy)
+end)
+
 UserInputService.InputBegan:Connect(function(i, g)
-    if not g and i.KeyCode == Enum.KeyCode.C then doCopy() end
-end)
-
--- ─── HELPERS ───
-local function dumpAttrs(obj, tag)
-    local attrs = obj:GetAttributes()
-    local has = false
-    for _ in pairs(attrs) do has = true break end
-    if not has then return end
-    log(("[attr] %s %s"):format(tag, obj:GetFullName()))
-    for k, v in attrs do
-        log(("       %s = %s (%s)"):format(k, tostring(v), typeof(v)))
-    end
-end
-
-local function dumpFullStructure(root)
-    log("╔══════════════════════════════════════════")
-    log(("║ STRUCTURE OF %s  [%s]"):format(root:GetFullName(), root.ClassName))
-    log("╚══════════════════════════════════════════")
-    dumpAttrs(root, "root")
-    local function walk(o, depth)
-        if depth > 5 then return end
-        for _, c in o:GetChildren() do
-            local indent = string.rep("  ", depth)
-            local extra = ""
-            if c:IsA("BasePart") then
-                extra = (" size=(%.2f,%.2f,%.2f) pos=(%.1f,%.1f,%.1f) mat=%s transp=%.2f")
-                    :format(c.Size.X, c.Size.Y, c.Size.Z,
-                            c.Position.X, c.Position.Y, c.Position.Z,
-                            tostring(c.Material), c.Transparency)
-            elseif c:IsA("Model") then
-                local _, s = c:GetBoundingBox()
-                extra = (" bbox=(%.2f,%.2f,%.2f)"):format(s.X, s.Y, s.Z)
-            elseif c:IsA("Highlight") then
-                extra = (" fillcolor=%s enabled=%s"):format(
-                    tostring(c.FillColor), tostring(c.Enabled))
-            elseif c:IsA("BillboardGui") then
-                extra = " billboard"
-            elseif c:IsA("TextLabel") then
-                extra = (" Text=%q"):format(c.Text)
-            end
-            log(("║ %s%s [%s]%s"):format(indent, c.Name, c.ClassName, extra))
-            dumpAttrs(c, "  " .. c.Name)
-            walk(c, depth + 1)
-        end
-    end
-    walk(root, 0)
-end
-
--- ─── WATCH ActivePlant ───
-local lastPrimaryY = nil
-local lastDumpT = 0
-local structureDumped = false
-
-task.spawn(function()
-    while true do
-        task.wait(0.25)
-        local ap = workspace:FindFirstChild("ActivePlant")
-        if ap then
-            -- dump full structure once per new ActivePlant instance
-            if not structureDumped then
-                structureDumped = true
-                dumpFullStructure(ap)
-            end
-
-            -- watch size changes on the largest part / model bbox
-            local _, size
-            if ap:IsA("Model") then
-                _, size = ap:GetBoundingBox()
-            elseif ap:IsA("BasePart") then
-                size = ap.Size
-            end
-            if size then
-                local y = size.Y
-                if lastPrimaryY and math.abs(y - lastPrimaryY) > 0.01 then
-                    local t = os.clock()
-                    if t - lastDumpT > 0.3 then
-                        lastDumpT = t
-                        log(("[grow] t=%.2f  bboxY=%.3f"):format(t, y))
-                    end
-                end
-                lastPrimaryY = y
-                infoLbl.Text = ("ActivePlant bboxY=%.3f\ncopied lines: %d"):format(y, #LOG)
-            end
-        else
-            -- ActivePlant disappeared: reset so we dump the new one on next spawn
-            if structureDumped then
-                log("[watch] ActivePlant removed")
-                structureDumped = false
-                lastPrimaryY = nil
-            end
-            infoLbl.Text = "waiting for ActivePlant...\ncopied lines: " .. #LOG
-        end
+    if g then return end
+    if i.KeyCode == Enum.KeyCode.C then
+        local text = table.concat(LOG, "\n")
+        pcall(function()
+            if setclipboard then setclipboard(text)
+            elseif toclipboard then toclipboard(text) end
+        end)
+    elseif i.KeyCode == Enum.KeyCode.R then
+        STATE.armed = not STATE.armed
+        log(("[reflex] %s"):format(STATE.armed and "ARMED" or "DISARMED"))
     end
 end)
 
-workspace.ChildAdded:Connect(function(c)
-    if c.Name == "ActivePlant" then
-        log(("[watch] 🟢 ActivePlant appeared: %s [%s]"):format(c:GetFullName(), c.ClassName))
-        structureDumped = false
-        lastPrimaryY = nil
-    end
-end)
-
-workspace.ChildRemoved:Connect(function(c)
-    if c.Name == "ActivePlant" then
-        log("[watch] 🔴 ActivePlant removed")
-        structureDumped = false
-        lastPrimaryY = nil
-    end
-end)
-
-log("[watch] loaded. plant a seed.")
-log("[watch] the full ActivePlant structure will be logged the moment it appears.")
-log("[watch] press C to copy.")
+log("[reflex] loaded — FINAL. Press R to toggle, C to copy.")
+log("[reflex] 5 signals armed: bolt, workspace, TreeGhost, __namecall, plateau.")
