@@ -1,119 +1,76 @@
 --==============================================================
---  TREE HEIGHT TRACKER  +  COPY-LOG BUTTON
---  Press C or click "COPY LOG" to copy all logged lines.
+--  ATTRIBUTE DUMPER
+--  During a round, dumps every attribute on:
+--    - the growing tree model
+--    - the plot model (ancestor of the tree)
+--    - the fruit spawn folder
+--  Press C to copy everything to clipboard.
 --==============================================================
 
 local Players           = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService  = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
-local T0 = os.clock()
-local function now() return os.clock() - T0 end
 
--- ─────────────────────────────────────────────────────────────
--- LOG CAPTURE  (we store every line we print)
--- ─────────────────────────────────────────────────────────────
 local LOG = {}
 local function log(s)
     print(s)
     table.insert(LOG, s)
-    if #LOG > 2000 then table.remove(LOG, 1) end
 end
 
--- ─────────────────────────────────────────────────────────────
--- HUD  +  COPY BUTTON
--- ─────────────────────────────────────────────────────────────
 local gui = Instance.new("ScreenGui")
-gui.Name = "TreeHeightTracker"
+gui.Name = "AttrDump"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = LP:WaitForChild("PlayerGui")
-
 local panel = Instance.new("Frame")
 panel.Position = UDim2.new(0, 10, 0, 10)
-panel.Size = UDim2.new(0, 300, 0, 130)
+panel.Size = UDim2.new(0, 280, 0, 80)
 panel.BackgroundColor3 = Color3.fromRGB(15,15,20)
 panel.BackgroundTransparency = 0.15
 panel.BorderSizePixel = 0
-panel.Active = true
-panel.Draggable = true
+panel.Active = true; panel.Draggable = true
 panel.Parent = gui
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 8)
 
-local function mk(n,y,h,f,s,c)
-    local l = Instance.new("TextLabel")
-    l.Name = n; l.BackgroundTransparency = 1
-    l.Position = UDim2.new(0,8,0,y); l.Size = UDim2.new(1,-16,0,h)
-    l.Font = f; l.TextSize = s; l.TextColor3 = c
-    l.TextXAlignment = Enum.TextXAlignment.Left
-    l.TextYAlignment = Enum.TextYAlignment.Top
-    l.TextWrapped = true; l.Parent = panel; return l
-end
-
-mk("T",4,14,Enum.Font.GothamBold,12,Color3.fromRGB(200,220,255)).Text = "🌳 TREE HEIGHT TRACKER"
-local statLbl = mk("S",20,14,Enum.Font.Code,10,Color3.fromRGB(180,220,120))
-statLbl.Text = "waiting..."
-local hLbl = mk("H",36,20,Enum.Font.Code,14,Color3.fromRGB(255,220,140))
-hLbl.Text = "h: --"
-local infoLbl = mk("I",58,30,Enum.Font.Code,10,Color3.fromRGB(160,200,160))
-infoLbl.Text = "info: --"
-local copiedLbl = mk("C",92,14,Enum.Font.Code,10,Color3.fromRGB(255,180,120))
-copiedLbl.Text = ""
-
--- COPY LOG button
 local btn = Instance.new("TextButton")
-btn.Name = "CopyBtn"
 btn.Position = UDim2.new(0, 8, 1, -30)
 btn.Size = UDim2.new(1, -16, 0, 24)
 btn.BackgroundColor3 = Color3.fromRGB(50, 90, 140)
-btn.BorderSizePixel = 0
 btn.Font = Enum.Font.GothamBold
 btn.TextSize = 12
 btn.TextColor3 = Color3.fromRGB(230, 240, 255)
-btn.Text = "📋 COPY LOG  (C)"
-btn.AutoButtonColor = true
+btn.Text = "📋 COPY  (C)"
+btn.BorderSizePixel = 0
 btn.Parent = panel
 Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
 
+local infoLbl = Instance.new("TextLabel")
+infoLbl.BackgroundTransparency = 1
+infoLbl.Position = UDim2.new(0, 8, 0, 4)
+infoLbl.Size = UDim2.new(1, -16, 0, 44)
+infoLbl.Font = Enum.Font.Code
+infoLbl.TextSize = 10
+infoLbl.TextColor3 = Color3.fromRGB(200, 220, 200)
+infoLbl.TextXAlignment = Enum.TextXAlignment.Left
+infoLbl.TextYAlignment = Enum.TextYAlignment.Top
+infoLbl.TextWrapped = true
+infoLbl.Text = "watching..."
+infoLbl.Parent = panel
+
 local function doCopy()
     local text = table.concat(LOG, "\n")
-    local ok = pcall(function()
-        if setclipboard then
-            setclipboard(text)
-        elseif toclipboard then
-            toclipboard(text)
-        else
-            error("no clipboard function")
-        end
+    pcall(function()
+        if setclipboard then setclipboard(text)
+        elseif toclipboard then toclipboard(text) end
     end)
-    copiedLbl.Text = ok
-        and ("✅ copied %d lines"):format(#LOG)
-        or  "❌ clipboard unavailable"
-    task.delay(2, function() copiedLbl.Text = "" end)
+    infoLbl.Text = ("copied %d lines"):format(#LOG)
 end
-
 btn.MouseButton1Click:Connect(doCopy)
-UserInputService.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    if input.KeyCode == Enum.KeyCode.C then doCopy() end
+UserInputService.InputBegan:Connect(function(i, g)
+    if not g and i.KeyCode == Enum.KeyCode.C then doCopy() end
 end)
 
--- ─────────────────────────────────────────────────────────────
--- RF HOOK
--- ─────────────────────────────────────────────────────────────
-local RF_PATH = ReplicatedStorage
-    :WaitForChild("Packages")._Index["sleitnick_knit@1.6.0"]
-    .knit.Services.PlantRoundService.RF
-local function getRF(n)
-    local ok, v = pcall(function() return RF_PATH:WaitForChild(n, 10) end)
-    return ok and v or nil
-end
-local StartRF = getRF("StartRound")
-local StopRF  = getRF("StopPlant")
-local DeadRF  = getRF("CollectDeadTree")
-
-local STATE = { active=false, startT=0, samples={}, seed=nil }
-
+-- find the tree near the player
 local function findTree()
     local best, bestVol
     for _, d in workspace:GetChildren() do
@@ -130,96 +87,57 @@ local function findTree()
     return best
 end
 
-local function heightOf(model)
-    if not model then return nil end
-    local _, size = model:GetBoundingBox()
-    return size.Y
+-- walk up the tree's ancestors to find the plot model
+local function plotOf(tree)
+    if not tree then return nil end
+    local cur = tree.Parent
+    for _ = 1, 6 do
+        if not cur or cur == workspace then return nil end
+        if cur:IsA("Model") and cur:FindFirstChild("FruitSpawns") then return cur end
+        cur = cur.Parent
+    end
+    return nil
 end
 
-local function dumpTrail(tag)
-    local n = #STATE.samples
-    if n == 0 then
-        log(("[tracker] %s — no samples"):format(tag))
-        return
-    end
-    log("── START ──")
-    log(("seed=%s  duration=%.2fs  samples=%d"):format(tostring(STATE.seed), STATE.samples[n].t, n))
+local dumpedTrees = {}
 
-    local parts = {}
-    for _, s in STATE.samples do
-        table.insert(parts, ("%.2f:%.3f"):format(s.t, s.h))
-    end
-    for i = 1, #parts, 5 do
-        local chunk = {}
-        for j = i, math.min(i+4, #parts) do
-            table.insert(chunk, parts[j])
-        end
-        log("  " .. table.concat(chunk, "  "))
-    end
-
-    if n >= 3 then
-        local tSum, hSum, ttSum, thSum = 0, 0, 0, 0
-        for _, s in STATE.samples do
-            tSum = tSum + s.t
-            hSum = hSum + s.h
-            ttSum = ttSum + s.t*s.t
-            thSum = thSum + s.t*s.h
-        end
-        local denom = n*ttSum - tSum*tSum
-        local slope = denom ~= 0 and (n*thSum - tSum*hSum) / denom or 0
-        local intercept = (hSum - slope*tSum) / n
-        log(("fit: h = %.4f * t + %.4f   (slope %.4f/s)")
-            :format(slope, intercept, slope))
-    end
-
-    log("── END ──")
-end
-
-do
-    local mt = getrawmetatable(game)
-    if mt then
-        local old = mt.__namecall
-        setreadonly(mt, false)
-        mt.__namecall = newcclosure(function(self, ...)
-            if getnamecallmethod() == "InvokeServer"
-            and (self == StartRF or self == StopRF or self == DeadRF) then
-                local args = { ... }
-                local rets = { old(self, ...) }
-                if self == StartRF then
-                    STATE.active = true
-                    STATE.startT = now()
-                    STATE.samples = {}
-                    STATE.seed = args[1] or "?"
-                    log(("[tracker] 🟢 START seed=%s fert=%s")
-                        :format(tostring(args[1]), tostring(args[2])))
-                elseif self == StopRF then
-                    STATE.active = false
-                    dumpTrail("StopPlant (early)")
-                elseif self == DeadRF then
-                    STATE.active = false
-                    dumpTrail("STRIKE")
-                end
-                return table.unpack(rets)
-            end
-            return old(self, ...)
-        end)
-        setreadonly(mt, true)
+local function dumpAttrs(obj, label)
+    if not obj then return end
+    local attrs = obj:GetAttributes()
+    local count = 0
+    for k, v in attrs do count = count + 1 end
+    if count == 0 then return end
+    log(("[attrs] %s  (%s)"):format(label, obj:GetFullName()))
+    for k, v in attrs do
+        log(("        %s = %s (%s)"):format(k, tostring(v), typeof(v)))
     end
 end
 
 task.spawn(function()
     while true do
-        task.wait(0.25)
-        if STATE.active then
-            local h = heightOf(findTree())
-            if h then
-                table.insert(STATE.samples, { t = now() - STATE.startT, h = h })
-                hLbl.Text = ("h: %.3f"):format(h)
-                infoLbl.Text = ("t: %.2fs  samples: %d"):format(now() - STATE.startT, #STATE.samples)
+        task.wait(1)
+        local tree = findTree()
+        if tree and not dumpedTrees[tree] then
+            dumpedTrees[tree] = true
+            log("════════════════════════════════════════")
+            log(("[dump] NEW TREE: %s"):format(tree:GetFullName()))
+            dumpAttrs(tree, "tree")
+            local plot = plotOf(tree)
+            if plot then
+                dumpAttrs(plot, "plot")
+                -- also dump the plot's parent (usually a folder of plots)
+                if plot.Parent and plot.Parent ~= workspace then
+                    dumpAttrs(plot.Parent, "plot.parent")
+                end
             end
+            -- also dump the fruit spawns folder
+            local fs = tree:FindFirstChild("FruitSpawns")
+            if fs then dumpAttrs(fs, "FruitSpawns") end
+            infoLbl.Text = ("dumped tree at %.1fs"):format(os.clock())
         end
     end
 end)
 
-log("[tracker] loaded.")
-log("[tracker] Plant a seed, wait for strike, then press C to copy the log.")
+log("[attr-dump] loaded.")
+log("[attr-dump] plant a seed — attributes will print when a new tree appears.")
+log("[attr-dump] press C to copy everything.")
