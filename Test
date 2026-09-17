@@ -1,10 +1,10 @@
 --==============================================================
---  ATTRIBUTE DUMPER
---  During a round, dumps every attribute on:
---    - the growing tree model
---    - the plot model (ancestor of the tree)
---    - the fruit spawn folder
---  Press C to copy everything to clipboard.
+--  ACTIVEPLANT DEEP WATCH
+--  Watches Workspace.ActivePlant. Dumps:
+--    - every attribute on it and its descendants
+--    - any BasePart size changes (with timestamps)
+--    - any new descendants that appear
+--  Press C to copy the whole log.
 --==============================================================
 
 local Players           = game:GetService("Players")
@@ -15,22 +15,37 @@ local LOG = {}
 local function log(s)
     print(s)
     table.insert(LOG, s)
+    if #LOG > 3000 then table.remove(LOG, 1) end
 end
 
+-- ─── HUD ───
 local gui = Instance.new("ScreenGui")
-gui.Name = "AttrDump"
+gui.Name = "ActivePlantWatch"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = LP:WaitForChild("PlayerGui")
 local panel = Instance.new("Frame")
 panel.Position = UDim2.new(0, 10, 0, 10)
-panel.Size = UDim2.new(0, 280, 0, 80)
+panel.Size = UDim2.new(0, 280, 0, 90)
 panel.BackgroundColor3 = Color3.fromRGB(15,15,20)
 panel.BackgroundTransparency = 0.15
 panel.BorderSizePixel = 0
 panel.Active = true; panel.Draggable = true
 panel.Parent = gui
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 8)
+
+local infoLbl = Instance.new("TextLabel")
+infoLbl.BackgroundTransparency = 1
+infoLbl.Position = UDim2.new(0, 8, 0, 4)
+infoLbl.Size = UDim2.new(1, -16, 0, 50)
+infoLbl.Font = Enum.Font.Code
+infoLbl.TextSize = 10
+infoLbl.TextColor3 = Color3.fromRGB(200, 220, 200)
+infoLbl.TextXAlignment = Enum.TextXAlignment.Left
+infoLbl.TextYAlignment = Enum.TextYAlignment.Top
+infoLbl.TextWrapped = true
+infoLbl.Text = "watching ActivePlant..."
+infoLbl.Parent = panel
 
 local btn = Instance.new("TextButton")
 btn.Position = UDim2.new(0, 8, 1, -30)
@@ -44,19 +59,6 @@ btn.BorderSizePixel = 0
 btn.Parent = panel
 Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
 
-local infoLbl = Instance.new("TextLabel")
-infoLbl.BackgroundTransparency = 1
-infoLbl.Position = UDim2.new(0, 8, 0, 4)
-infoLbl.Size = UDim2.new(1, -16, 0, 44)
-infoLbl.Font = Enum.Font.Code
-infoLbl.TextSize = 10
-infoLbl.TextColor3 = Color3.fromRGB(200, 220, 200)
-infoLbl.TextXAlignment = Enum.TextXAlignment.Left
-infoLbl.TextYAlignment = Enum.TextYAlignment.Top
-infoLbl.TextWrapped = true
-infoLbl.Text = "watching..."
-infoLbl.Parent = panel
-
 local function doCopy()
     local text = table.concat(LOG, "\n")
     pcall(function()
@@ -64,80 +66,124 @@ local function doCopy()
         elseif toclipboard then toclipboard(text) end
     end)
     infoLbl.Text = ("copied %d lines"):format(#LOG)
+    task.delay(2, function()
+        infoLbl.Text = "watching ActivePlant..."
+    end)
 end
 btn.MouseButton1Click:Connect(doCopy)
 UserInputService.InputBegan:Connect(function(i, g)
     if not g and i.KeyCode == Enum.KeyCode.C then doCopy() end
 end)
 
--- find the tree near the player
-local function findTree()
-    local best, bestVol
-    for _, d in workspace:GetChildren() do
-        if d:IsA("Model") and d.Name ~= "TreeGhost" then
-            if d.Name:lower():find("tree") or d:FindFirstChild("FruitSpawns") then
-                local _, size = d:GetBoundingBox()
-                local vol = size.X * size.Y * size.Z
-                if vol > 0 and (not bestVol or vol > bestVol) then
-                    best, bestVol = d, vol
-                end
+-- ─── HELPERS ───
+local function dumpAttrs(obj, tag)
+    local attrs = obj:GetAttributes()
+    local has = false
+    for _ in pairs(attrs) do has = true break end
+    if not has then return end
+    log(("[attr] %s %s"):format(tag, obj:GetFullName()))
+    for k, v in attrs do
+        log(("       %s = %s (%s)"):format(k, tostring(v), typeof(v)))
+    end
+end
+
+local function dumpFullStructure(root)
+    log("╔══════════════════════════════════════════")
+    log(("║ STRUCTURE OF %s  [%s]"):format(root:GetFullName(), root.ClassName))
+    log("╚══════════════════════════════════════════")
+    dumpAttrs(root, "root")
+    local function walk(o, depth)
+        if depth > 5 then return end
+        for _, c in o:GetChildren() do
+            local indent = string.rep("  ", depth)
+            local extra = ""
+            if c:IsA("BasePart") then
+                extra = (" size=(%.2f,%.2f,%.2f) pos=(%.1f,%.1f,%.1f) mat=%s transp=%.2f")
+                    :format(c.Size.X, c.Size.Y, c.Size.Z,
+                            c.Position.X, c.Position.Y, c.Position.Z,
+                            tostring(c.Material), c.Transparency)
+            elseif c:IsA("Model") then
+                local _, s = c:GetBoundingBox()
+                extra = (" bbox=(%.2f,%.2f,%.2f)"):format(s.X, s.Y, s.Z)
+            elseif c:IsA("Highlight") then
+                extra = (" fillcolor=%s enabled=%s"):format(
+                    tostring(c.FillColor), tostring(c.Enabled))
+            elseif c:IsA("BillboardGui") then
+                extra = " billboard"
+            elseif c:IsA("TextLabel") then
+                extra = (" Text=%q"):format(c.Text)
             end
+            log(("║ %s%s [%s]%s"):format(indent, c.Name, c.ClassName, extra))
+            dumpAttrs(c, "  " .. c.Name)
+            walk(c, depth + 1)
         end
     end
-    return best
+    walk(root, 0)
 end
 
--- walk up the tree's ancestors to find the plot model
-local function plotOf(tree)
-    if not tree then return nil end
-    local cur = tree.Parent
-    for _ = 1, 6 do
-        if not cur or cur == workspace then return nil end
-        if cur:IsA("Model") and cur:FindFirstChild("FruitSpawns") then return cur end
-        cur = cur.Parent
-    end
-    return nil
-end
-
-local dumpedTrees = {}
-
-local function dumpAttrs(obj, label)
-    if not obj then return end
-    local attrs = obj:GetAttributes()
-    local count = 0
-    for k, v in attrs do count = count + 1 end
-    if count == 0 then return end
-    log(("[attrs] %s  (%s)"):format(label, obj:GetFullName()))
-    for k, v in attrs do
-        log(("        %s = %s (%s)"):format(k, tostring(v), typeof(v)))
-    end
-end
+-- ─── WATCH ActivePlant ───
+local lastPrimaryY = nil
+local lastDumpT = 0
+local structureDumped = false
 
 task.spawn(function()
     while true do
-        task.wait(1)
-        local tree = findTree()
-        if tree and not dumpedTrees[tree] then
-            dumpedTrees[tree] = true
-            log("════════════════════════════════════════")
-            log(("[dump] NEW TREE: %s"):format(tree:GetFullName()))
-            dumpAttrs(tree, "tree")
-            local plot = plotOf(tree)
-            if plot then
-                dumpAttrs(plot, "plot")
-                -- also dump the plot's parent (usually a folder of plots)
-                if plot.Parent and plot.Parent ~= workspace then
-                    dumpAttrs(plot.Parent, "plot.parent")
-                end
+        task.wait(0.25)
+        local ap = workspace:FindFirstChild("ActivePlant")
+        if ap then
+            -- dump full structure once per new ActivePlant instance
+            if not structureDumped then
+                structureDumped = true
+                dumpFullStructure(ap)
             end
-            -- also dump the fruit spawns folder
-            local fs = tree:FindFirstChild("FruitSpawns")
-            if fs then dumpAttrs(fs, "FruitSpawns") end
-            infoLbl.Text = ("dumped tree at %.1fs"):format(os.clock())
+
+            -- watch size changes on the largest part / model bbox
+            local _, size
+            if ap:IsA("Model") then
+                _, size = ap:GetBoundingBox()
+            elseif ap:IsA("BasePart") then
+                size = ap.Size
+            end
+            if size then
+                local y = size.Y
+                if lastPrimaryY and math.abs(y - lastPrimaryY) > 0.01 then
+                    local t = os.clock()
+                    if t - lastDumpT > 0.3 then
+                        lastDumpT = t
+                        log(("[grow] t=%.2f  bboxY=%.3f"):format(t, y))
+                    end
+                end
+                lastPrimaryY = y
+                infoLbl.Text = ("ActivePlant bboxY=%.3f\ncopied lines: %d"):format(y, #LOG)
+            end
+        else
+            -- ActivePlant disappeared: reset so we dump the new one on next spawn
+            if structureDumped then
+                log("[watch] ActivePlant removed")
+                structureDumped = false
+                lastPrimaryY = nil
+            end
+            infoLbl.Text = "waiting for ActivePlant...\ncopied lines: " .. #LOG
         end
     end
 end)
 
-log("[attr-dump] loaded.")
-log("[attr-dump] plant a seed — attributes will print when a new tree appears.")
-log("[attr-dump] press C to copy everything.")
+workspace.ChildAdded:Connect(function(c)
+    if c.Name == "ActivePlant" then
+        log(("[watch] 🟢 ActivePlant appeared: %s [%s]"):format(c:GetFullName(), c.ClassName))
+        structureDumped = false
+        lastPrimaryY = nil
+    end
+end)
+
+workspace.ChildRemoved:Connect(function(c)
+    if c.Name == "ActivePlant" then
+        log("[watch] 🔴 ActivePlant removed")
+        structureDumped = false
+        lastPrimaryY = nil
+    end
+end)
+
+log("[watch] loaded. plant a seed.")
+log("[watch] the full ActivePlant structure will be logged the moment it appears.")
+log("[watch] press C to copy.")
