@@ -1,53 +1,42 @@
 --==============================================================
---  ROLLWEIGHTED DEEP TESTER
---  Logs every roll's full table + signature.
---  On strike, dumps any roll whose table isn't the mutation table.
+--  TREE HEIGHT TRACKER  +  COPY-LOG BUTTON
+--  Press C or click "COPY LOG" to copy all logged lines.
 --==============================================================
 
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
+local UserInputService  = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
 local T0 = os.clock()
 local function now() return os.clock() - T0 end
 
-local RF_PATH = ReplicatedStorage
-    :WaitForChild("Packages")._Index["sleitnick_knit@1.6.0"]
-    .knit.Services.PlantRoundService.RF
-
-local function getRF(n)
-    local ok, v = pcall(function() return RF_PATH:WaitForChild(n, 10) end)
-    return ok and v or nil
+-- ─────────────────────────────────────────────────────────────
+-- LOG CAPTURE  (we store every line we print)
+-- ─────────────────────────────────────────────────────────────
+local LOG = {}
+local function log(s)
+    print(s)
+    table.insert(LOG, s)
+    if #LOG > 2000 then table.remove(LOG, 1) end
 end
-local StartRF = getRF("StartRound")
-local StopRF  = getRF("StopPlant")
-local DeadRF  = getRF("CollectDeadTree")
-
--- Known mutation signature
-local MUTATION_SIG = "375/150/100/50/25"
-
-local STATE = {
-    roundActive = false,
-    roundStartT = 0,
-    rolls       = {},   -- { t, sig, key, entries, raw }
-}
 
 -- ─────────────────────────────────────────────────────────────
--- HUD
+-- HUD  +  COPY BUTTON
 -- ─────────────────────────────────────────────────────────────
 local gui = Instance.new("ScreenGui")
-gui.Name = "RWDeepTest"
+gui.Name = "TreeHeightTracker"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = LP:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
 panel.Position = UDim2.new(0, 10, 0, 10)
-panel.Size = UDim2.new(0, 300, 0, 110)
+panel.Size = UDim2.new(0, 300, 0, 130)
 panel.BackgroundColor3 = Color3.fromRGB(15,15,20)
 panel.BackgroundTransparency = 0.15
 panel.BorderSizePixel = 0
-panel.Active = true; panel.Draggable = true
+panel.Active = true
+panel.Draggable = true
 panel.Parent = gui
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 8)
 
@@ -60,175 +49,177 @@ local function mk(n,y,h,f,s,c)
     l.TextYAlignment = Enum.TextYAlignment.Top
     l.TextWrapped = true; l.Parent = panel; return l
 end
-mk("T",4,14,Enum.Font.GothamBold,12,Color3.fromRGB(200,220,255)).Text = "🎲 RW DEEP TESTER"
-local statusLbl = mk("S",20,16,Enum.Font.GothamBold,11,Color3.fromRGB(180,220,120))
-statusLbl.Text = "WAITING"
-local rollCountLbl = mk("RC",38,16,Enum.Font.Code,10,Color3.fromRGB(200,200,160))
-rollCountLbl.Text = "rolls: 0  unique tables: 0"
-local recentLbl = mk("R",56,48,Enum.Font.Code,9,Color3.fromRGB(150,200,150))
-recentLbl.Text = ""
 
-local uniqueTables = {}   -- sig -> count
+mk("T",4,14,Enum.Font.GothamBold,12,Color3.fromRGB(200,220,255)).Text = "🌳 TREE HEIGHT TRACKER"
+local statLbl = mk("S",20,14,Enum.Font.Code,10,Color3.fromRGB(180,220,120))
+statLbl.Text = "waiting..."
+local hLbl = mk("H",36,20,Enum.Font.Code,14,Color3.fromRGB(255,220,140))
+hLbl.Text = "h: --"
+local infoLbl = mk("I",58,30,Enum.Font.Code,10,Color3.fromRGB(160,200,160))
+infoLbl.Text = "info: --"
+local copiedLbl = mk("C",92,14,Enum.Font.Code,10,Color3.fromRGB(255,180,120))
+copiedLbl.Text = ""
 
--- ─────────────────────────────────────────────────────────────
--- ROUND HANDLERS
--- ─────────────────────────────────────────────────────────────
-local function startRound()
-    STATE.roundActive = true
-    STATE.roundStartT = now()
-    STATE.rolls = {}
-    uniqueTables = {}
-    print(("[%.2f] 🟢 StartRound"):format(now()))
-end
+-- COPY LOG button
+local btn = Instance.new("TextButton")
+btn.Name = "CopyBtn"
+btn.Position = UDim2.new(0, 8, 1, -30)
+btn.Size = UDim2.new(1, -16, 0, 24)
+btn.BackgroundColor3 = Color3.fromRGB(50, 90, 140)
+btn.BorderSizePixel = 0
+btn.Font = Enum.Font.GothamBold
+btn.TextSize = 12
+btn.TextColor3 = Color3.fromRGB(230, 240, 255)
+btn.Text = "📋 COPY LOG  (C)"
+btn.AutoButtonColor = true
+btn.Parent = panel
+Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
 
-local function dumpNonMutation()
-    print(("[%.2f] 📊 ROLL REPORT — all unique table signatures seen this round:"):format(now()))
-    for sig, info in pairs(uniqueTables) do
-        local isMutation = (sig == MUTATION_SIG)
-        print(("   %s  sig=[%s]  count=%d")
-            :format(isMutation and "  " or "❗", sig, info.count))
-    end
-
-    -- dump any non-mutation rolls in full
-    local found = false
-    for _, r in STATE.rolls do
-        if r.sig ~= MUTATION_SIG then
-            found = true
-            print(("   ❗ NON-MUTATION ROLL at t=%.2f  key=%s  sig=[%s]  entries=%d")
-                :format(r.t, tostring(r.key), r.sig, r.entries))
-            for i, e in r.raw do
-                print(("        [%d] weight=%s  name=%s")
-                    :format(i, tostring(e.weight), tostring(e.name)))
-            end
+local function doCopy()
+    local text = table.concat(LOG, "\n")
+    local ok = pcall(function()
+        if setclipboard then
+            setclipboard(text)
+        elseif toclipboard then
+            toclipboard(text)
+        else
+            error("no clipboard function")
         end
-    end
-    if not found then
-        print("   (no non-mutation rolls this round — every roll used the mutation table)")
-    end
+    end)
+    copiedLbl.Text = ok
+        and ("✅ copied %d lines"):format(#LOG)
+        or  "❌ clipboard unavailable"
+    task.delay(2, function() copiedLbl.Text = "" end)
 end
 
-local function stopRound(kind)
-    if not STATE.roundActive then return end
-    STATE.roundActive = false
-    if kind == "dead" then
-        print(("[%.2f] ☠️ STRIKE — duration %.2fs  (%d rolls)")
-            :format(now(), now() - STATE.roundStartT, #STATE.rolls))
-        dumpNonMutation()
-    else
-        print(("[%.2f] ✅ StopPlant (early)"):format(now()))
-    end
-end
+btn.MouseButton1Click:Connect(doCopy)
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.C then doCopy() end
+end)
 
 -- ─────────────────────────────────────────────────────────────
 -- RF HOOK
 -- ─────────────────────────────────────────────────────────────
+local RF_PATH = ReplicatedStorage
+    :WaitForChild("Packages")._Index["sleitnick_knit@1.6.0"]
+    .knit.Services.PlantRoundService.RF
+local function getRF(n)
+    local ok, v = pcall(function() return RF_PATH:WaitForChild(n, 10) end)
+    return ok and v or nil
+end
+local StartRF = getRF("StartRound")
+local StopRF  = getRF("StopPlant")
+local DeadRF  = getRF("CollectDeadTree")
+
+local STATE = { active=false, startT=0, samples={}, seed=nil }
+
+local function findTree()
+    local best, bestVol
+    for _, d in workspace:GetChildren() do
+        if d:IsA("Model") and d.Name ~= "TreeGhost" then
+            if d.Name:lower():find("tree") or d:FindFirstChild("FruitSpawns") then
+                local _, size = d:GetBoundingBox()
+                local vol = size.X * size.Y * size.Z
+                if vol > 0 and (not bestVol or vol > bestVol) then
+                    best, bestVol = d, vol
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function heightOf(model)
+    if not model then return nil end
+    local _, size = model:GetBoundingBox()
+    return size.Y
+end
+
+local function dumpTrail(tag)
+    local n = #STATE.samples
+    if n == 0 then
+        log(("[tracker] %s — no samples"):format(tag))
+        return
+    end
+    log("── START ──")
+    log(("seed=%s  duration=%.2fs  samples=%d"):format(tostring(STATE.seed), STATE.samples[n].t, n))
+
+    local parts = {}
+    for _, s in STATE.samples do
+        table.insert(parts, ("%.2f:%.3f"):format(s.t, s.h))
+    end
+    for i = 1, #parts, 5 do
+        local chunk = {}
+        for j = i, math.min(i+4, #parts) do
+            table.insert(chunk, parts[j])
+        end
+        log("  " .. table.concat(chunk, "  "))
+    end
+
+    if n >= 3 then
+        local tSum, hSum, ttSum, thSum = 0, 0, 0, 0
+        for _, s in STATE.samples do
+            tSum = tSum + s.t
+            hSum = hSum + s.h
+            ttSum = ttSum + s.t*s.t
+            thSum = thSum + s.t*s.h
+        end
+        local denom = n*ttSum - tSum*tSum
+        local slope = denom ~= 0 and (n*thSum - tSum*hSum) / denom or 0
+        local intercept = (hSum - slope*tSum) / n
+        log(("fit: h = %.4f * t + %.4f   (slope %.4f/s)")
+            :format(slope, intercept, slope))
+    end
+
+    log("── END ──")
+end
+
 do
     local mt = getrawmetatable(game)
     if mt then
         local old = mt.__namecall
         setreadonly(mt, false)
         mt.__namecall = newcclosure(function(self, ...)
-            local m = getnamecallmethod()
-            if m == "InvokeServer"
+            if getnamecallmethod() == "InvokeServer"
             and (self == StartRF or self == StopRF or self == DeadRF) then
+                local args = { ... }
                 local rets = { old(self, ...) }
-                if self == StartRF then startRound()
-                elseif self == StopRF then stopRound("early")
-                elseif self == DeadRF then stopRound("dead")
+                if self == StartRF then
+                    STATE.active = true
+                    STATE.startT = now()
+                    STATE.samples = {}
+                    STATE.seed = args[1] or "?"
+                    log(("[tracker] 🟢 START seed=%s fert=%s")
+                        :format(tostring(args[1]), tostring(args[2])))
+                elseif self == StopRF then
+                    STATE.active = false
+                    dumpTrail("StopPlant (early)")
+                elseif self == DeadRF then
+                    STATE.active = false
+                    dumpTrail("STRIKE")
                 end
                 return table.unpack(rets)
             end
             return old(self, ...)
         end)
         setreadonly(mt, true)
-        print("[tester] __namecall ✔")
     end
 end
 
--- ─────────────────────────────────────────────────────────────
--- ROLL HOOK — captures FULL table
--- ─────────────────────────────────────────────────────────────
-do
-    local ok, RW = pcall(function()
-        return require(ReplicatedStorage.Shared.Utility.RollWeighted)
-    end)
-    if ok and type(RW) == "table" and type(RW.Roll) == "function" then
-        local orig = RW.Roll
-        RW.Roll = function(self, tbl, dbg)
-            -- capture full table BEFORE calling original
-            local raw = {}
-            local sigParts = {}
-            local total = 0
-            if type(tbl) == "table" then
-                for i, e in tbl do
-                    raw[i] = {
-                        weight = e.weight,
-                        name = e.name or e.kind or e.type or tostring(i),
-                    }
-                    table.insert(sigParts, tostring(e.weight))
-                    total += (e.weight or 0)
-                end
-            end
-            local sig = table.concat(sigParts, "/")
-
-            local result, key = orig(self, tbl, dbg)
-
-            if STATE.roundActive then
-                table.insert(STATE.rolls, {
-                    t = now() - STATE.roundStartT,
-                    sig = sig, key = key,
-                    entries = #raw, raw = raw,
-                })
-                uniqueTables[sig] = uniqueTables[sig] or { count = 0 }
-                uniqueTables[sig].count = uniqueTables[sig].count + 1
-
-                -- update HUD
-                local nUnique = 0
-                for _ in pairs(uniqueTables) do nUnique = nUnique + 1 end
-                rollCountLbl.Text = ("rolls: %d  unique tables: %d")
-                    :format(#STATE.rolls, nUnique)
-
-                if sig ~= MUTATION_SIG then
-                    print(("[%.2f] ❗ NON-MUTATION ROLL  key=%s  sig=[%s]  entries=%d")
-                        :format(now() - STATE.roundStartT, tostring(key), sig, #raw))
-                    for i, e in raw do
-                        print(("     [%d] weight=%s name=%s")
-                            :format(i, tostring(e.weight), tostring(e.name)))
-                    end
-                end
-            end
-            return result, key
-        end
-        print("[tester] RollWeighted.Roll hooked (full table capture) ✔")
-    end
-end
-
--- ─────────────────────────────────────────────────────────────
--- HUD LOOP
--- ─────────────────────────────────────────────────────────────
 task.spawn(function()
     while true do
-        task.wait(0.1)
-        if STATE.roundActive then
-            statusLbl.Text = ("ROUND +%.1fs"):format(now() - STATE.roundStartT)
-            statusLbl.TextColor3 = Color3.fromRGB(120,220,120)
-
-            -- show last 3 roll signatures
-            local lines = {}
-            local start = math.max(1, #STATE.rolls - 2)
-            for i = start, #STATE.rolls do
-                local r = STATE.rolls[i]
-                local mark = (r.sig == MUTATION_SIG) and " " or "❗"
-                table.insert(lines, ("%s t=%.1f k=%s [%s]")
-                    :format(mark, r.t, tostring(r.key), r.sig))
+        task.wait(0.25)
+        if STATE.active then
+            local h = heightOf(findTree())
+            if h then
+                table.insert(STATE.samples, { t = now() - STATE.startT, h = h })
+                hLbl.Text = ("h: %.3f"):format(h)
+                infoLbl.Text = ("t: %.2fs  samples: %d"):format(now() - STATE.startT, #STATE.samples)
             end
-            recentLbl.Text = table.concat(lines, "\n")
-        else
-            statusLbl.Text = "WAITING"
-            statusLbl.TextColor3 = Color3.fromRGB(180,180,120)
         end
     end
 end)
 
-print("[tester] loaded. Plant a seed, let it get struck.")
-print("[tester] Watch for ❗ = non-mutation roll (that would be the lightning roll).")
+log("[tracker] loaded.")
+log("[tracker] Plant a seed, wait for strike, then press C to copy the log.")
