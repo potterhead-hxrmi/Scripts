@@ -1,0 +1,308 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Window = Rayfield:CreateWindow({
+   Name = "Brainrot Trading",
+   Icon = 0, -- Icon in Topbar. Can use Lucide Icons (string) or Roblox Image (number). 0 to use no icon (default).
+   LoadingTitle = "Game: ✅ | Brainrot Trading |",
+   LoadingSubtitle = "by Hrxmi",
+   ShowText = "Brainrot Trading", -- for mobile users to unhide Rayfield, change if you'd like
+   Theme = "Default", -- Check https://docs.sirius.menu/rayfield/configuration/themes
+
+   ToggleUIKeybind = "K", -- The keybind to toggle the UI visibility (string like "K" or Enum.KeyCode)
+
+   DisableRayfieldPrompts = false,
+   DisableBuildWarnings = false, -- Prevents Rayfield from emitting warnings when the script has a version mismatch with the interface.
+
+   -- Heartbeat = "https://www.sentivel.com/api/heartbeat/<your token>", -- Pings your Sentivel heartbeat while Rayfield is open, so you can see whether your script is running
+
+   -- ScriptID = "sid_xxxxxxxxxxxx", -- Your Script ID from developer.sirius.menu — enables analytics, managed keys, and script hosting
+
+   ConfigurationSaving = {
+      Enabled = false,
+      FolderName = nil, -- Create a custom folder for your hub/game
+      FileName = "Big Hub"
+   },
+
+   Discord = {
+      Enabled = false, -- Prompt the user to join your Discord server if their executor supports it
+      Invite = "noinvitelink", -- The Discord invite code, do not include Discord.gg/. E.g. Discord.gg/ABCD would be ABCD
+      RememberJoins = true -- Set this to false to make them join the Discord every time they load it up
+   },
+
+   KeySystem = false, -- Set this to true to use our key system
+   KeySettings = {
+      Title = "Untitled",
+      Subtitle = "Key System",
+      Note = "No method of obtaining the key is provided", -- Use this to tell the user how to get a key
+      FileName = "Key", -- It is recommended to use something unique, as other scripts using Rayfield may overwrite your key file
+      SaveKey = true, -- The user's key will be saved, but if you change the key, they will be unable to use your script
+      GrabKeyFromSite = false, -- If this is true, set Key below to the RAW site you would like Rayfield to get the key from
+      Key = {"Hello"} -- List of keys that the system will accept, can be RAW file links (pastebin, github, etc.) or simple strings ("hello", "key22")
+   }
+})
+local Tab = Window:CreateTab("Main", 4483362458) -- Title, Image
+local Section = Tab:CreateSection("• Value Gamepass •")
+-- State kept outside so it survives across clicks
+local _vtOn = false
+local _vtOriginals = {}
+local _vtConn = nil
+
+local function _vtFind()
+	local Workspace = game:GetService("Workspace")
+	local found, seen = {}, {}
+	local function add(l)
+		if l and not seen[l] then seen[l] = true; table.insert(found, l) end
+	end
+	local tf = Workspace:FindFirstChild("TradesFolder")
+	if tf then
+		for _, tp in ipairs(tf:GetChildren()) do
+			local touch = tp:FindFirstChild("Touch")
+			if touch then
+				local gui = touch:FindFirstChild("Players")
+				if gui and gui:IsA("BillboardGui") then
+					for _, d in ipairs(gui:GetDescendants()) do
+						if d:IsA("TextLabel") and d.Name == "Value" then add(d) end
+					end
+				end
+			end
+		end
+	end
+	for _, d in ipairs(Workspace:GetDescendants()) do
+		if d:IsA("TextLabel") and d.Name == "Value" then add(d) end
+	end
+	return found
+end
+
+Tab:CreateToggle({
+	Name = "Reveal Values",
+	CurrentValue = false,
+	Flag = "RevealValues",
+	Callback = function(Value)
+		if Value then
+			_vtOn = true
+			if _vtConn then _vtConn:Disconnect() end
+			_vtConn = game:GetService("RunService").RenderStepped:Connect(function()
+				if not _vtOn then return end
+				for _, l in ipairs(_vtFind()) do
+					if _vtOriginals[l] == nil then _vtOriginals[l] = l.Visible end
+					if not l.Visible then l.Visible = true end
+				end
+			end)
+		else
+			_vtOn = false
+			if _vtConn then _vtConn:Disconnect(); _vtConn = nil end
+			for l, v in pairs(_vtOriginals) do
+				pcall(function() l.Visible = v end)
+			end
+			_vtOriginals = {}
+		end
+	end,
+})
+-- ============================================================
+-- Rayfield toggle controls whether the swap panel is visible.
+-- The panel's own toggle controls whether the swap is active.
+-- ============================================================
+
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace  = game:GetService("Workspace")
+local UIS        = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+
+-- ============================================================
+-- Finders
+-- ============================================================
+local function getClosestTradePlace(pos)
+	local folder = Workspace:FindFirstChild("TradesFolder")
+	if not folder then return nil end
+	local closest, bestDist = nil, math.huge
+	for _, tp in ipairs(folder:GetChildren()) do
+		if tp:IsA("Model") then
+			local ref = tp.PrimaryPart or tp:FindFirstChild("Touch")
+				or tp:FindFirstChildWhichIsA("BasePart")
+			if ref then
+				local d = (ref.Position - pos).Magnitude
+				if d < bestDist then bestDist = d; closest = tp end
+			end
+		end
+	end
+	return closest
+end
+
+local function getClosestGroup(tradePlace, baseName, pos)
+	local closest, bestDist = nil, math.huge
+	for i = 1, 2 do
+		local grp = tradePlace:FindFirstChild(baseName .. i)
+		if grp then
+			local hb = grp:FindFirstChild("Hitbox")
+			if hb then
+				local d = (hb.Position - pos).Magnitude
+				if d < bestDist then
+					bestDist = d
+					closest = { model = grp, hitbox = hb }
+				end
+			end
+		end
+	end
+	return closest
+end
+
+-- ============================================================
+-- Swap state
+-- ============================================================
+local swapOn = false
+local swapConn = nil
+local activeSwaps = {}
+
+local function restoreAll()
+	for _, entry in ipairs(activeSwaps) do
+		pcall(function() entry.hitbox.CFrame = entry.original end)
+	end
+	activeSwaps = {}
+end
+
+local function tickSwap()
+	local char = player.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	local tp = getClosestTradePlace(hrp.Position)
+	if not tp then return end
+
+	local correct = getClosestGroup(tp, "CorrectGroup", hrp.Position)
+	local wrong   = getClosestGroup(tp, "WrongeGroup", hrp.Position)
+	if not correct or not wrong then return end
+
+	local function ensureTracked(hb)
+		for _, e in ipairs(activeSwaps) do
+			if e.hitbox == hb then return end
+		end
+		table.insert(activeSwaps, { hitbox = hb, original = hb.CFrame })
+	end
+
+	ensureTracked(correct.hitbox)
+	ensureTracked(wrong.hitbox)
+
+	local target = hrp.CFrame
+	correct.hitbox.CFrame = target - Vector3.new(0, 10, 0)
+	wrong.hitbox.CFrame   = target
+end
+
+local function startSwap()
+	if swapConn then swapConn:Disconnect() end
+	swapOn = true
+	swapConn = RunService.RenderStepped:Connect(function()
+		if swapOn then tickSwap() end
+	end)
+end
+
+local function stopSwap()
+	swapOn = false
+	if swapConn then swapConn:Disconnect(); swapConn = nil end
+	restoreAll()
+end
+
+-- ============================================================
+-- On-screen panel (only visible when Rayfield toggle is ON)
+-- ============================================================
+local panelGui = Instance.new("ScreenGui")
+panelGui.Name = "HitboxSwapPanel"
+panelGui.ResetOnSpawn = false
+panelGui.IgnoreGuiInset = true
+panelGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+panelGui.Enabled = false -- hidden by default
+panelGui.Parent = player:WaitForChild("PlayerGui")
+
+local panel = Instance.new("Frame")
+panel.Size = UDim2.new(0, 220, 0, 110)
+panel.Position = UDim2.new(0, 20, 0.5, -55)
+panel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+panel.BackgroundTransparency = 0.15
+panel.BorderSizePixel = 0
+panel.Active = true
+panel.Draggable = true -- built-in drag for frames
+panel.Parent = panelGui
+
+local panelCorner = Instance.new("UICorner")
+panelCorner.CornerRadius = UDim.new(0, 12)
+panelCorner.Parent = panel
+
+local panelStroke = Instance.new("UIStroke")
+panelStroke.Color = Color3.fromRGB(220, 30, 30)
+panelStroke.Thickness = 2
+panelStroke.Parent = panel
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -16, 0, 26)
+title.Position = UDim2.new(0, 8, 0, 6)
+title.BackgroundTransparency = 1
+title.Text = "Trade Scam 🤑"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 16
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = panel
+
+-- The on-screen toggle button
+local toggle = Instance.new("TextButton")
+toggle.Size = UDim2.new(1, -16, 0, 44)
+toggle.Position = UDim2.new(0, 8, 0, 44)
+toggle.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+toggle.BorderSizePixel = 0
+toggle.Text = "OFF"
+toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggle.Font = Enum.Font.GothamBold
+toggle.TextSize = 18
+toggle.AutoButtonColor = false
+toggle.Parent = panel
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 10)
+toggleCorner.Parent = toggle
+
+local toggleStroke = Instance.new("UIStroke")
+toggleStroke.Color = Color3.fromRGB(220, 30, 30)
+toggleStroke.Thickness = 2
+toggleStroke.Parent = toggle
+
+toggle.MouseButton1Click:Connect(function()
+	if swapOn then
+		stopSwap()
+		toggle.Text = "OFF"
+		toggle.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+		toggleStroke.Color = Color3.fromRGB(220, 30, 30)
+	else
+		startSwap()
+		toggle.Text = "ON"
+		toggle.BackgroundColor3 = Color3.fromRGB(0, 90, 40)
+		toggleStroke.Color = Color3.fromRGB(30, 220, 90)
+	end
+end)
+
+-- ============================================================
+-- Rayfield toggle — shows/hides the panel
+-- ============================================================
+Tab:CreateToggle({
+	Name = "Trade Scam Panel",
+	CurrentValue = false,
+	Flag = "HitboxSwapPanel",
+	Callback = function(Value)
+		panelGui.Enabled = Value
+		if not Value then
+			-- Hide panel = also force the swap off
+			if swapOn then
+				stopSwap()
+				toggle.Text = "OFF"
+				toggle.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+				toggleStroke.Color = Color3.fromRGB(220, 30, 30)
+			end
+		end
+	end,
+})
+local Button = Tab:CreateButton({
+   Name = "Destroy UI",
+   Callback = function()
+   Rayfield:Destroy()
+   end,
+})
