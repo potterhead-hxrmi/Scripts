@@ -32,7 +32,7 @@ local Window = Rayfield:CreateWindow({
 })
 
 local Tab = Window:CreateTab("Main", 4483362458)
-local Section = Tab:CreateSection("• Value Gamepass •")
+local Section = Tab:CreateSection("• Value/Trade •")
 
 -- ============================================================
 -- Reveal Values toggle (instant, no lag)
