@@ -35,34 +35,48 @@ local Tab = Window:CreateTab("Main", 4483362458)
 local Section = Tab:CreateSection("• Value Gamepass •")
 
 -- ============================================================
--- Reveal Values toggle
+-- Reveal Values toggle (instant, no lag)
 -- ============================================================
 local _vtOn = false
-local _vtOriginals = {}
-local _vtConn = nil
+local _vtOriginals = {}   -- [label] = original Visible
+local _vtConnections = {} -- [label] = RBXScriptConnection
+local _vtScanner = nil
+
+local function _vtHook(label)
+	if _vtConnections[label] then return end
+
+	if _vtOriginals[label] == nil then
+		_vtOriginals[label] = label.Visible
+	end
+
+	if not label.Visible then
+		label.Visible = true
+	end
+
+	_vtConnections[label] = label:GetPropertyChangedSignal("Visible"):Connect(function()
+		if _vtOn and not label.Visible then
+			label.Visible = true
+		end
+	end)
+end
 
 local function _vtFind()
 	local Workspace = game:GetService("Workspace")
-	local found, seen = {}, {}
-	local function add(l)
-		if l and not seen[l] then seen[l] = true; table.insert(found, l) end
-	end
 	local tf = Workspace:FindFirstChild("TradesFolder")
-	if tf then
-		for _, tp in ipairs(tf:GetChildren()) do
-			local touch = tp:FindFirstChild("Touch")
-			if touch then
-				local gui = touch:FindFirstChild("Players")
-				if gui and gui:IsA("BillboardGui") then
-					for _, d in ipairs(gui:GetDescendants()) do
-						if d:IsA("TextLabel") and d.Name == "Value" then add(d) end
+	if not tf then return {} end
+	local found = {}
+	for _, tp in ipairs(tf:GetChildren()) do
+		local touch = tp:FindFirstChild("Touch")
+		if touch then
+			local gui = touch:FindFirstChild("Players")
+			if gui and gui:IsA("BillboardGui") then
+				for _, d in ipairs(gui:GetDescendants()) do
+					if d:IsA("TextLabel") and d.Name == "Value" then
+						table.insert(found, d)
 					end
 				end
 			end
 		end
-	end
-	for _, d in ipairs(Workspace:GetDescendants()) do
-		if d:IsA("TextLabel") and d.Name == "Value" then add(d) end
 	end
 	return found
 end
@@ -74,17 +88,33 @@ Tab:CreateToggle({
 	Callback = function(Value)
 		if Value then
 			_vtOn = true
-			if _vtConn then _vtConn:Disconnect() end
-			_vtConn = game:GetService("RunService").RenderStepped:Connect(function()
-				if not _vtOn then return end
-				for _, l in ipairs(_vtFind()) do
-					if _vtOriginals[l] == nil then _vtOriginals[l] = l.Visible end
-					if not l.Visible then l.Visible = true end
+			_vtOriginals = {}
+			_vtConnections = {}
+
+			for _, l in ipairs(_vtFind()) do
+				_vtHook(l)
+			end
+
+			_vtScanner = task.spawn(function()
+				while _vtOn do
+					task.wait(0.5)
+					if not _vtOn then break end
+					for _, l in ipairs(_vtFind()) do
+						if not _vtConnections[l] then
+							_vtHook(l)
+						end
+					end
 				end
 			end)
 		else
 			_vtOn = false
-			if _vtConn then _vtConn:Disconnect(); _vtConn = nil end
+			_vtScanner = nil
+
+			for _, conn in pairs(_vtConnections) do
+				pcall(function() conn:Disconnect() end)
+			end
+			_vtConnections = {}
+
 			for l, v in pairs(_vtOriginals) do
 				pcall(function() l.Visible = v end)
 			end
@@ -103,7 +133,6 @@ local UIS        = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
 
--- Finders
 local function getClosestTradePlace(pos)
 	local folder = Workspace:FindFirstChild("TradesFolder")
 	if not folder then return nil end
@@ -121,8 +150,6 @@ local function getClosestTradePlace(pos)
 	return closest
 end
 
--- Figure out which side (1 or 2) you're on by comparing
--- the distance from your HRP to CorrectGroup1 vs CorrectGroup2
 local function getMySide(tradePlace, pos)
 	local cg1 = tradePlace:FindFirstChild("CorrectGroup1")
 	local cg2 = tradePlace:FindFirstChild("CorrectGroup2")
@@ -141,8 +168,8 @@ end
 -- Swap state
 local swapOn = false
 local swapConn = nil
-local activeSwaps = {}      -- currently swapped hitboxes
-local currentSideKey = nil  -- "TradePlaceName:side" to detect side changes
+local activeSwaps = {}
+local currentSideKey = nil
 
 local function restoreAll()
 	for _, entry in ipairs(activeSwaps) do
@@ -167,7 +194,6 @@ local function tickSwap()
 
 	local tp = getClosestTradePlace(hrp.Position)
 	if not tp then
-		-- No trade place nearby — release anything we had
 		if currentSideKey then restoreAll() end
 		return
 	end
@@ -177,8 +203,6 @@ local function tickSwap()
 
 	local key = tp.Name .. ":" .. tostring(side)
 
-	-- If side changed (walked to other slot, or different TradePlace),
-	-- restore the previous hitboxes before swapping the new side
 	if currentSideKey ~= key then
 		restoreAll()
 		currentSideKey = key
