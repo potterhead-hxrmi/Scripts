@@ -32,31 +32,22 @@ local Window = Rayfield:CreateWindow({
 })
 
 local Tab = Window:CreateTab("Main", 4483362458)
-local Section = Tab:CreateSection("• Value/Trade •")
+local Section = Tab:CreateSection("• Value Gamepass •")
 
 -- ============================================================
 -- Reveal Values toggle (instant, no lag)
 -- ============================================================
 local _vtOn = false
-local _vtOriginals = {}   -- [label] = original Visible
-local _vtConnections = {} -- [label] = RBXScriptConnection
+local _vtOriginals = {}
+local _vtConnections = {}
 local _vtScanner = nil
 
 local function _vtHook(label)
 	if _vtConnections[label] then return end
-
-	if _vtOriginals[label] == nil then
-		_vtOriginals[label] = label.Visible
-	end
-
-	if not label.Visible then
-		label.Visible = true
-	end
-
+	if _vtOriginals[label] == nil then _vtOriginals[label] = label.Visible end
+	if not label.Visible then label.Visible = true end
 	_vtConnections[label] = label:GetPropertyChangedSignal("Visible"):Connect(function()
-		if _vtOn and not label.Visible then
-			label.Visible = true
-		end
+		if _vtOn and not label.Visible then label.Visible = true end
 	end)
 end
 
@@ -90,31 +81,23 @@ Tab:CreateToggle({
 			_vtOn = true
 			_vtOriginals = {}
 			_vtConnections = {}
-
-			for _, l in ipairs(_vtFind()) do
-				_vtHook(l)
-			end
-
+			for _, l in ipairs(_vtFind()) do _vtHook(l) end
 			_vtScanner = task.spawn(function()
 				while _vtOn do
 					task.wait(0.5)
 					if not _vtOn then break end
 					for _, l in ipairs(_vtFind()) do
-						if not _vtConnections[l] then
-							_vtHook(l)
-						end
+						if not _vtConnections[l] then _vtHook(l) end
 					end
 				end
 			end)
 		else
 			_vtOn = false
 			_vtScanner = nil
-
 			for _, conn in pairs(_vtConnections) do
 				pcall(function() conn:Disconnect() end)
 			end
 			_vtConnections = {}
-
 			for l, v in pairs(_vtOriginals) do
 				pcall(function() l.Visible = v end)
 			end
@@ -124,7 +107,7 @@ Tab:CreateToggle({
 })
 
 -- ============================================================
--- Trade Scam (Hitbox Swap) — logic
+-- Trade Scam (Hitbox Swap)
 -- ============================================================
 local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -154,18 +137,14 @@ local function getMySide(tradePlace, pos)
 	local cg1 = tradePlace:FindFirstChild("CorrectGroup1")
 	local cg2 = tradePlace:FindFirstChild("CorrectGroup2")
 	if not cg1 or not cg2 then return nil end
-
 	local hb1 = cg1:FindFirstChild("Hitbox")
 	local hb2 = cg2:FindFirstChild("Hitbox")
 	if not hb1 or not hb2 then return nil end
-
 	local d1 = (hb1.Position - pos).Magnitude
 	local d2 = (hb2.Position - pos).Magnitude
-
 	return d1 <= d2 and 1 or 2
 end
 
--- Swap state
 local swapOn = false
 local swapConn = nil
 local activeSwaps = {}
@@ -202,7 +181,6 @@ local function tickSwap()
 	if not side then return end
 
 	local key = tp.Name .. ":" .. tostring(side)
-
 	if currentSideKey ~= key then
 		restoreAll()
 		currentSideKey = key
@@ -238,9 +216,6 @@ local function stopSwap()
 	restoreAll()
 end
 
--- ============================================================
--- On-screen panel
--- ============================================================
 local panelGui = Instance.new("ScreenGui")
 panelGui.Name = "HitboxSwapPanel"
 panelGui.ResetOnSpawn = false
@@ -314,9 +289,6 @@ toggle.MouseButton1Click:Connect(function()
 	end
 end)
 
--- ============================================================
--- Rayfield toggle — shows/hides the panel
--- ============================================================
 Tab:CreateToggle({
 	Name = "Trade Scam Panel",
 	CurrentValue = false,
@@ -335,11 +307,162 @@ Tab:CreateToggle({
 })
 
 -- ============================================================
+-- Auto Roll + Auto Sell (multi-select)
+-- ============================================================
+local Section2 = Tab:CreateSection("• Auto Roll •")
+
+local _arSelected = {}
+local _arRolling = false
+local _arThread = nil
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Ordered worst -> best
+local BRAINROT_NAMES = {
+	"Talpa Di Fero",
+	"Pipi Kiwi",
+	"Bombardini Tortinii",
+	"Cocoteddy",
+	"Ta Ta Ta Ta Sahur",
+	"Cappuccino Assassino",
+	"Trulimero Trulicina",
+	"Boba Panda",
+	"Bandito Axolito",
+	"Carloo",
+	"Chef Crabacadabra",
+	"Cocosini Mama",
+	"Doi Doi Do",
+	"Mythic Lucky Block",
+	"Cavallo Virtuoso",
+	"Stoppo Luminino",
+	"Tic Tic Ribbit",
+	"Centrucei Nuclucci",
+	"Tukanno Bananno",
+	"Brainrot God Lucky Block",
+	"Fizzy Soda",
+	"Pop Pop Sahur",
+	"Tenini Ballini",
+	"Karkerkar Kurkur",
+	"Zombie Tralala",
+	"Vulturino Skeletono",
+	"GOAT",
+	"1x1x1x1",
+	"Anpali Babel",
+	"Pot Hotspot",
+	"Frio Ninja",
+	"La Grande Combinasion",
+	"Celularcini Viciosini",
+	"Chillin Chili",
+	"Esok Sekolah",
+	"Aquanaut",
+	"Tictac Sahur",
+	"Cigno Fulgoro",
+	"Spaghetti Tualetti",
+	"Capitano Gullini",
+	"Dragon Cannelloni",
+	"Skibidi Toilet",
+	"Headless Horseman",
+	"Meowl",
+	"Strawberry Elephant",
+	"Dragon Aquanini",
+	"Aquarino",
+}
+
+local function fireRoll()
+	local machine = Workspace:FindFirstChild("RNGMachine")
+	if not machine then return end
+	local promptHolder = machine:FindFirstChild("Prompt")
+	if not promptHolder then return end
+	local prompt = promptHolder:FindFirstChild("RNGMachinePrompt")
+	if not prompt then return end
+	pcall(function() fireproximityprompt(prompt) end)
+end
+
+local function isSelected(name)
+	for _, n in ipairs(_arSelected) do
+		if n == name then return true end
+	end
+	return false
+end
+
+local function getHeldMatch()
+	if #_arSelected == 0 then return nil end
+	local splitFolder = Workspace:FindFirstChild("HahaDoASplit")
+	if not splitFolder then return nil end
+	for _, tool in ipairs(splitFolder:GetChildren()) do
+		if tool:IsA("Tool") and isSelected(tool.Name) then
+			return tool
+		end
+	end
+	return nil
+end
+
+local function sellTool(toolName)
+	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+	if not remotes then return end
+	local remote = remotes:FindFirstChild("SellAndDrop")
+	if not remote then return end
+	pcall(function()
+		remote:FireServer("Sell", {
+			Price = 100,
+			Name = toolName,
+		})
+	end)
+end
+
+local function autoRollLoop()
+	while _arRolling do
+		fireRoll()
+		local match = getHeldMatch()
+		if match then
+			sellTool(match.Name)
+		end
+		task.wait(0.1)
+	end
+end
+
+local function startAutoRoll()
+	if _arThread then return end
+	_arRolling = true
+	_arThread = task.spawn(autoRollLoop)
+end
+
+local function stopAutoRoll()
+	_arRolling = false
+	_arThread = nil
+end
+
+Tab:CreateToggle({
+	Name = "Auto Roll",
+	CurrentValue = false,
+	Flag = "AutoRoll",
+	Callback = function(Value)
+		if Value then startAutoRoll() else stopAutoRoll() end
+	end,
+})
+
+Tab:CreateDropdown({
+	Name = "Auto Sell Targets",
+	Options = BRAINROT_NAMES,
+	CurrentOption = {},
+	MultipleOptions = true,
+	Flag = "AutoSellTargets",
+	Callback = function(Option)
+		if type(Option) == "table" then
+			_arSelected = Option
+		else
+			_arSelected = { Option }
+		end
+	end,
+})
+
+-- ============================================================
 -- Destroy UI
 -- ============================================================
 Tab:CreateButton({
 	Name = "Destroy UI",
 	Callback = function()
+		stopAutoRoll()
 		Rayfield:Destroy()
 	end,
 })
